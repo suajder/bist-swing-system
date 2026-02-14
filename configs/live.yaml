@@ -1,0 +1,23 @@
+period_days: 1095
+
+adv20_min: 50000000
+top_k: 5
+
+signal_params:
+  d_ema_fast: 20
+  d_ema_slow: 50
+  rsi_n: 14
+  rsi_entry_max: 70
+  mom_n: 20
+  w_ema_fast: 10
+  w_ema_slow: 30
+
+backtest_params:
+  fee_bps: 8.0
+  slippage_bps: 5.0
+  use_atr_stop: true
+  atr_stop_mult: 0.2
+  swing_lookback: 10
+  swing_buffer: 0.01
+  tp1_R: 2.0
+  tp2_R: 3.0
