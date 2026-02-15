@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import os
 from datetime import datetime, time
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -18,10 +19,11 @@ from bist_swing.state_store import StateStore
 from bist_swing.position_state import Position
 from bist_swing.live_events import compute_entry_levels, evaluate_position_events
 
-# .env (TG_BOT_TOKEN, TG_CHAT_ID, vs.)
-load_dotenv()
-
 ROOT = Path(__file__).resolve().parents[1]
+
+# .env (TG_BOT_TOKEN, TG_CHAT_ID)
+load_dotenv(dotenv_path=ROOT / ".env", override=True)
+
 STATE_PATH = ROOT / "signals_state.json"
 BLACKLIST_PATH = ROOT / "configs" / "blacklist.txt"
 
@@ -77,9 +79,11 @@ def pick_safe_asof(any_df: pd.DataFrame, user_asof: str | None) -> pd.Timestamp:
             if not candidates:
                 raise RuntimeError("No suitable date <= --asof")
             a = candidates[-1]
+
         loc = idx.get_loc(a)
         if isinstance(loc, slice) or loc + 1 >= len(idx):
-            raise RuntimeError("--asof has no next bar.")
+            # next bar yoksa güvenli bir önceki tamamlanmış bara düş
+            a = pd.to_datetime(idx[-2])
         return pd.to_datetime(a)
 
     # default: son tamamlanmış bar = -2
@@ -109,7 +113,7 @@ def fmt_entry_tr(
     tp2_R: float,
 ) -> str:
     trend = "↑" if ema20 > ema50 else "↓"
-    adv_mr = adv20 / 1_000_000_000
+    adv_mr = adv20 / 1_000_000_000 if adv20 else 0.0
     mom_pct = mom20 * 100.0
     return (
         f"📈 {ticker} | GİRİŞ SİNYALİ (Swing)\n"
@@ -126,7 +130,13 @@ def main() -> None:
     ap.add_argument("--config", default=str(ROOT / "configs" / "live.yaml"))
     ap.add_argument("--universe", default=str(ROOT / "configs" / "universe.txt"))
     ap.add_argument("--asof", default=None)
+    ap.add_argument("--force", action="store_true", help="Dedup'u bypass et (test amaçlı).")
     args = ap.parse_args()
+
+    # Telegram env kontrol (sessiz fail olmasın)
+    if not os.getenv("TG_BOT_TOKEN") or not os.getenv("TG_CHAT_ID"):
+        print("[FATAL] TG_BOT_TOKEN / TG_CHAT_ID yok. ROOT/.env okunmadı.")
+        return
 
     cfg = yaml.safe_load(Path(args.config).read_text(encoding="utf-8"))
     universe = load_universe(Path(args.universe))
@@ -173,7 +183,7 @@ def main() -> None:
                 hard_bad.append(t)
 
             key = f"DATAERR::{t}::{datetime.now().date()}"
-            if not store.seen(state, key):
+            if args.force or (not store.seen(state, key)):
                 short = "404/Not Found (Yahoo) -> blacklist'e eklenecek" if t in hard_bad else msg[:140]
                 safe_send(notifier, f"⚠️ {t} | VERİ HATASI | {short}")
                 store.mark(state, key)
@@ -189,15 +199,18 @@ def main() -> None:
     any_df = next(iter(price_map.values()))
     asof = pick_safe_asof(any_df, args.asof)
 
+    if args.asof:
+        safe_send(notifier, f"ℹ️ İstenen asof={args.asof} → kullanılan asof={asof.date()} (güvenli bar kuralı)")
+
     # RUN ÖZETİ (tek mesaj)
     ok_n = len(price_map)
     bad_n = len(bad_tickers)
     sum_key = f"RUN_SUMMARY::{asof.date()}"
-    if not store.seen(state, sum_key):
+    if args.force or (not store.seen(state, sum_key)):
         safe_send(
             notifier,
-            f"ℹ️ Run özeti | asof={asof.date()} | Veri OK: {ok_n} | Hatalı: {bad_n}"
-            + (f"\nHatalı semboller (ilk 10): {', '.join(bad_tickers[:10])}" if bad_n else "")
+            f"ℹ️ Run Özeti | asof={asof.date()} | Veri OK: {ok_n} | Hatalı: {bad_n} | Blacklist+: {len(hard_bad)}"
+            + (f"\nHatalı (ilk 10): {', '.join(bad_tickers[:10])}" if bad_n else "")
         )
         store.mark(state, sum_key)
 
@@ -233,7 +246,7 @@ def main() -> None:
 
             for ev in events:
                 ev_key = f"EV::{ev.event}::{ev.ticker}::{ev.date.date()}"
-                if store.seen(state, ev_key):
+                if (not args.force) and store.seen(state, ev_key):
                     continue
 
                 tp1_lvl = pos.entry_px + bp.tp1_R * pos.r
@@ -305,11 +318,13 @@ def main() -> None:
     entry_budget = min(remaining_slots, max_new_entries_per_run)
 
     header_key = f"ENTRY_HDR::{asof.date()}::top{top_k}::adv{int(adv_min)}"
+
     if picks:
-        if not store.seen(state, header_key):
+        if args.force or (not store.seen(state, header_key)):
             safe_send(
                 notifier,
-                f"✅ ENTRY_CANDIDATES asof={asof.date()} | top{top_k} | adv_min={adv_min:,.0f} | open={open_n}/{max_open_positions} | budget={entry_budget}"
+                f"✅ ENTRY_CANDIDATES | asof={asof.date()} | top{top_k} | adv_min={adv_min:,.0f}\n"
+                f"Pozisyon: {open_n}/{max_open_positions} | Yeni giriş bütçesi: {entry_budget}"
             )
             store.mark(state, header_key)
 
@@ -318,7 +333,7 @@ def main() -> None:
                 break
 
             key = f"ENTRY::{t}::{asof.date()}"
-            if store.seen(state, key):
+            if (not args.force) and store.seen(state, key):
                 continue
 
             # açık pozisyon varsa tekrar açma
@@ -327,7 +342,10 @@ def main() -> None:
                 continue
 
             df = price_map[t]
-            sig = sig_cache.get(t) or se.build(df, sp)
+            sig = sig_cache.get(t)
+            if sig is None:
+                sig = se.build(df, sp)
+
 
             try:
                 entry_px, stop_px, r, nxt = compute_entry_levels(df, sig, asof, bp)
@@ -380,30 +398,60 @@ def main() -> None:
             except Exception as e:
                 safe_send(notifier, f"⚠️ {t} | SİNYAL HESAP HATASI | {str(e)[:180]}")
                 store.mark(state, key)
+
     else:
-        if not store.seen(state, header_key):
-            safe_send(notifier, f"⛔ NO ENTRY asof={asof.date()} | adv_min={adv_min:,.0f} | open={open_n}/{max_open_positions}")
+        if args.force or (not store.seen(state, header_key)):
+            safe_send(notifier, f"⛔ NO ENTRY | asof={asof.date()} | adv_min={adv_min:,.0f} | Pozisyon={open_n}/{max_open_positions}")
             store.mark(state, header_key)
 
     # ---------------------------------------------------------------------
-    # 3) GÜN SONU TEK RAPOR (EOD)
+    # 3) GÜN SONU PROFESYONEL RAPOR (EOD v2.1)
     # ---------------------------------------------------------------------
     report_key = f"EOD_REPORT::{asof.date()}"
-    if not store.seen(state, report_key):
-        open_pos_lines: list[str] = []
-        for sym, pdict in state["positions"].items():
-            if pdict.get("is_open"):
-                open_pos_lines.append(
-                    f"- {sym} | entry={pdict.get('entry_px'):.2f} | stop={pdict.get('stop_px'):.2f} | tp1_done={pdict.get('tp1_done')}"
-                )
 
-        txt = (
-            f"📌 Gün Sonu Özet | asof={asof.date()}\n"
-            f"Veri OK: {len(price_map)} | Hatalı: {len(bad_tickers)} | Blacklist eklendi: {len(hard_bad)}\n"
-            f"Açık Pozisyon: {len(open_pos_lines)}\n"
-            + ("\n".join(open_pos_lines[:12]) if open_pos_lines else "Açık pozisyon yok.")
-        )
-        safe_send(notifier, txt)
+    if args.force or (not store.seen(state, report_key)):
+
+        open_pos = [
+            (sym, pdict)
+            for sym, pdict in state["positions"].items()
+            if pdict.get("is_open")
+        ]
+
+        capacity_line = f"{len(open_pos)}/{max_open_positions}"
+
+        lines: list[str] = []
+        lines.append(f"📊 GÜN SONU RAPORU | {asof.date()}")
+        lines.append("")
+        lines.append("🔎 Veri Özeti:")
+        lines.append(f"✔ Başarılı: {len(price_map)}")
+        lines.append(f"✖ Hatalı: {len(bad_tickers)}")
+        lines.append(f"⛔ Blacklist’e eklenen: {len(hard_bad)}")
+        lines.append("")
+        lines.append(f"📈 Açık Pozisyon ({capacity_line} kapasite)")
+
+        if not open_pos:
+            lines.append("• Açık pozisyon yok.")
+        else:
+            for i, (sym, pdict) in enumerate(open_pos, start=1):
+                entry = float(pdict.get("entry_px"))
+                stop = float(pdict.get("stop_px"))
+                risk = abs(entry - stop)
+                tp1_done = bool(pdict.get("tp1_done", False))
+                durum = "TP1 Gerçekleşti (Stop=Entry)" if tp1_done else "TP1 Bekleniyor"
+                lines.append("")
+                lines.append(f"{i}️⃣ {sym}")
+                lines.append(f"Entry: {entry:.2f}")
+                lines.append(f"Stop: {stop:.2f}")
+                lines.append(f"Risk (1R): {risk:.2f}")
+                lines.append(f"Durum: {durum}")
+
+        lines.append("")
+        lines.append("⚙ Sistem:")
+        lines.append(f"Max Pozisyon: {max_open_positions}")
+        lines.append(f"Yeni Giriş Limiti (run): {max_new_entries_per_run}")
+        lines.append(f"Force: {'Açık' if args.force else 'Kapalı'}")
+
+        safe_send(notifier, "\n".join(lines))
         store.mark(state, report_key)
 
     store.save(state)
