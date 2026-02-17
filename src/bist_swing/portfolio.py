@@ -8,15 +8,26 @@ import numpy as np
 import pandas as pd
 
 from .backtest import BacktestParams
+from .live_events import resolve_intrabar_exit
 from .reporting import plot_equity
 from .signals import SignalEngine, SignalParams
 
 
 @dataclass(frozen=True)
 class PortfolioParams:
-    max_open: int = 3
-    initial_equity: float = 1_000_000.0
+    # portfolio constraints
+    max_open: int = 5
+
+    # starting capital
+    initial_equity: float = 50_000.0
+
+    # liquidity filter
     adv20_min: float = 50_000_000.0
+
+    # risk-based position sizing
+    risk_pct: float = 0.015  # %1.5 risk per trade (balanced growth)
+
+    # ranking weights
     w_model: float = 1.0
     w_rsi: float = 0.15
     w_mom: float = 0.10
@@ -79,8 +90,8 @@ def portfolio_backtest_pro(
 
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
-    trades = []
-    equity_rows = []
+    trades: List[tuple] = []
+    equity_rows: List[tuple] = []
 
     # Use params from first ticker for costs (or could keep per-ticker)
     any_bp = best_cfg_map[tickers[0]][1]
@@ -122,37 +133,64 @@ def portfolio_backtest_pro(
                 positions.pop(sym, None)
                 continue
 
-            # stop
-            if l2 <= pos.stop_px:
-                px = pos.stop_px * (1 - slip)
+            # Unified intrabar resolution (same as live/backtest):
+            # closest-to-open first, tie-break STOP (conservative)
+            tp1 = pos.entry_px + bp.tp1_R * pos.R
+            tp2 = pos.entry_px + bp.tp2_R * pos.R
+
+            evt, lvl, _extra = resolve_intrabar_exit(
+                o2=o2,
+                h2=h2,
+                l2=l2,
+                stop_lvl=float(pos.stop_px),
+                tp1_lvl=float(tp1),
+                tp2_lvl=float(tp2),
+                tp1_done=bool(pos.tp1),
+                tp2_done=bool(pos.tp2),
+            )
+
+            if evt == "STOP":
+                px = float(lvl) * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
                 trades.append((nxt, sym, "Stop", px, pos.shares))
                 positions.pop(sym, None)
                 continue
 
-            # TP1/TP2
-            tp1 = pos.entry_px + bp.tp1_R * pos.R
-            tp2 = pos.entry_px + bp.tp2_R * pos.R
-
-            if (not pos.tp1) and (h2 >= tp1):
+            if evt == "TP1":
                 qty = min(pos.orig_shares / 3.0, pos.shares)
-                px = tp1 * (1 - slip)
-                proceeds = qty * px * (1 - fee)
-                cash += proceeds
-                pos.shares -= qty
-                pos.tp1 = True
-                trades.append((nxt, sym, "TP1", px, qty))
+                if qty > 0:
+                    px = float(lvl) * (1 - slip)
+                    proceeds = qty * px * (1 - fee)
+                    cash += proceeds
+                    pos.shares -= qty
+                    pos.tp1 = True
+                    pos.stop_px = pos.entry_px
+                    trades.append((nxt, sym, "TP1", px, qty))
 
-            if (not pos.tp2) and (h2 >= tp2):
+                if pos.shares <= 1e-12:
+                    positions.pop(sym, None)
+                else:
+                    positions[sym] = pos
+                continue
+
+            if evt == "TP2":
                 qty = min(pos.orig_shares / 3.0, pos.shares)
-                px = tp2 * (1 - slip)
-                proceeds = qty * px * (1 - fee)
-                cash += proceeds
-                pos.shares -= qty
-                pos.tp2 = True
-                trades.append((nxt, sym, "TP2", px, qty))
+                if qty > 0:
+                    px = float(lvl) * (1 - slip)
+                    proceeds = qty * px * (1 - fee)
+                    cash += proceeds
+                    pos.shares -= qty
+                    pos.tp2 = True
+                    trades.append((nxt, sym, "TP2", px, qty))
 
+                if pos.shares <= 1e-12:
+                    positions.pop(sym, None)
+                else:
+                    positions[sym] = pos
+                continue
+
+            # no exit on this bar
             if pos.shares <= 1e-12:
                 positions.pop(sym, None)
             else:
@@ -161,7 +199,7 @@ def portfolio_backtest_pro(
         # entries: build candidate list at t, fill next open
         cap = pparams.max_open - len(positions)
         if cap > 0:
-            cands = []
+            cands: List[str] = []
             for sym in tickers:
                 if sym in positions:
                     continue
@@ -190,7 +228,7 @@ def portfolio_backtest_pro(
                 tmp["z_mom"] = zscore(tmp["mom"])
                 tmp["z_adv"] = zscore(tmp["log_adv"])
 
-                scores = {}
+                scores: Dict[str, float] = {}
                 for sym in tmp.index:
                     s_model = model_score_map.get(sym, 0.0)
                     scores[sym] = float(
@@ -203,8 +241,8 @@ def portfolio_backtest_pro(
                 ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
                 selected = [s for s, _ in ranked[:cap]]
 
-                # slot sizing
-                eq_now = equity_rows[-1][1]
+                # diversification slot sizing (cap per position)
+                eq_now = float(equity_rows[-1][1])
                 slot = eq_now / max(1, pparams.max_open)
 
                 for sym in selected:
@@ -226,15 +264,34 @@ def portfolio_backtest_pro(
                     if not np.isfinite(R) or R <= 0:
                         continue
 
-                    notional = min(slot, cash)
-                    if notional <= 0:
-                        continue
-                    fee_cost = notional * fee
-                    shares = (notional - fee_cost) / entry_px
-                    if shares <= 0:
+                    # --- Risk-based position sizing (% risk of equity) ---
+                    risk_amt = eq_now * float(pparams.risk_pct)
+                    shares_risk = np.floor(risk_amt / R)
+
+                    if (not np.isfinite(shares_risk)) or shares_risk < 1:
                         continue
 
-                    cash -= notional
+                    # cap by diversification slot (avoid concentration)
+                    shares_slot = np.floor(slot / entry_px)
+                    if (not np.isfinite(shares_slot)) or shares_slot < 1:
+                        continue
+
+                    # cap by cash affordability (include fee)
+                    shares_cash = np.floor(cash / (entry_px * (1.0 + fee)))
+                    if (not np.isfinite(shares_cash)) or shares_cash < 1:
+                        continue
+
+                    shares = float(min(shares_risk, shares_slot, shares_cash))
+                    if shares < 1:
+                        continue
+
+                    notional = shares * entry_px
+                    fee_cost = notional * fee
+                    total_cost = notional + fee_cost
+                    if total_cost > cash:
+                        continue
+
+                    cash -= total_cost
                     positions[sym] = _Pos(
                         entry_px=entry_px,
                         stop_px=stop_px,
