@@ -272,7 +272,7 @@ def main() -> None:
                 # A kuralı: TP1 -> %50 realize + stop=entry (breakeven)
                 if ev.event == "TP1":
                     pos.tp1_done = True
-                    pos.qty = max(0.5, pos.qty * 0.5)
+                    pos.qty *= 0.5
                     pos.stop_px = pos.entry_px
                 elif ev.event == "TP2":
                     pos.tp2_done = True
