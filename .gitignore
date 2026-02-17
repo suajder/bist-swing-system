@@ -24,3 +24,7 @@ Thumbs.db
 #Environment variables
 .env
 signals_state.json
+
+*.egg-info/
+_smoke_*.py
+
