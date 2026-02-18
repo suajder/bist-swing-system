@@ -30,6 +30,9 @@ class PortfolioParams:
     daily_stop_R: float = 3.0
     weekly_stop_R: float = 6.0
 
+    max_notional_pct: float = 0.35       # equity'nin max %35'i tek pozisyona
+    min_cash_buffer_pct: float = 0.05    # equity'nin %5'i nakitte kalsın
+
     # ranking weights
     w_model: float = 1.0
     w_rsi: float = 0.15
@@ -310,12 +313,20 @@ def portfolio_backtest_pro(
                     if (not np.isfinite(shares_slot)) or shares_slot < 1:
                         continue
 
+                    max_notional = eq_now * pparams.max_notional_pct
+                    shares_notional = np.floor(max_notional / entry_px)
+                    if (not np.isfinite(shares_notional)) or shares_notional < 1:
+                        continue
+
                     # cap by cash affordability (include fee)
-                    shares_cash = np.floor(cash / (entry_px * (1.0 + fee)))
+                    cash_buffer = eq_now * pparams.min_cash_buffer_pct
+                    available_cash = max(0.0, cash - cash_buffer)
+                    shares_cash = np.floor(available_cash / (entry_px * (1.0 + fee)))
+
                     if (not np.isfinite(shares_cash)) or shares_cash < 1:
                         continue
 
-                    shares = float(min(shares_risk, shares_slot, shares_cash))
+                    shares = float(min(shares_risk, shares_slot, shares_notional, shares_cash))
                     if shares < 1:
                         continue
 
