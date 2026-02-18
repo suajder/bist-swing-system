@@ -24,8 +24,11 @@ class PortfolioParams:
     # liquidity filter
     adv20_min: float = 50_000_000.0
 
-    # risk-based position sizing
-    risk_pct: float = 0.015  # %1.5 risk per trade (balanced growth)
+    # risk-based position sizing  
+    risk_pct: float = 0.02 # %2 risk per trade (balanced growth)
+
+    daily_stop_R: float = 3.0
+    weekly_stop_R: float = 6.0
 
     # ranking weights
     w_model: float = 1.0
@@ -91,6 +94,10 @@ def portfolio_backtest_pro(
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
     trades: List[tuple] = []
+    day_r = 0.0
+    week_r = 0.0
+    cur_day = None
+    cur_week = None
     equity_rows: List[tuple] = []
 
     # Use params from first ticker for costs (or could keep per-ticker)
@@ -100,6 +107,18 @@ def portfolio_backtest_pro(
 
     for i in range(len(cal) - 1):
         t = cal[i]
+
+        d = pd.Timestamp(t).date()
+        w = pd.Timestamp(t).isocalendar().week
+
+        if cur_day is None or d != cur_day:
+            cur_day = d
+            day_r = 0.0
+
+        if cur_week is None or w != cur_week:
+            cur_week = w
+            week_r = 0.0
+
         nxt = cal[i + 1]
 
         # mark-to-market close
@@ -129,6 +148,9 @@ def portfolio_backtest_pro(
                 px = o2 * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
+                r_pnl = (px - pos.entry_px) * pos.shares / pos.R
+                day_r += r_pnl
+                week_r += r_pnl
                 trades.append((nxt, sym, "WeeklyExit", px, pos.shares))
                 positions.pop(sym, None)
                 continue
@@ -153,6 +175,9 @@ def portfolio_backtest_pro(
                 px = float(lvl) * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
+                r_pnl = (px - pos.entry_px) * pos.shares / pos.R
+                day_r += r_pnl
+                week_r += r_pnl
                 trades.append((nxt, sym, "Stop", px, pos.shares))
                 positions.pop(sym, None)
                 continue
@@ -163,6 +188,9 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
+                    r_pnl = (px - pos.entry_px) * qty / pos.R
+                    day_r += r_pnl
+                    week_r += r_pnl
                     pos.shares -= qty
                     pos.tp1 = True
                     pos.stop_px = pos.entry_px
@@ -180,6 +208,9 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
+                    r_pnl = (px - pos.entry_px) * qty / pos.R
+                    day_r += r_pnl
+                    week_r += r_pnl
                     pos.shares -= qty
                     pos.tp2 = True
                     trades.append((nxt, sym, "TP2", px, qty))
@@ -197,8 +228,11 @@ def portfolio_backtest_pro(
                 positions[sym] = pos
 
         # entries: build candidate list at t, fill next open
+        killsw = (day_r <= -pparams.daily_stop_R) or (week_r <= -pparams.weekly_stop_R)
+
         cap = pparams.max_open - len(positions)
-        if cap > 0:
+        if (cap > 0) and (not killsw):
+
             cands: List[str] = []
             for sym in tickers:
                 if sym in positions:
