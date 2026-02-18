@@ -153,10 +153,15 @@ def portfolio_backtest_pro(
 
             # weekly exit
             if bool(sig.loc[t, "w_exit_regime"]):
+                qty = float(pos.shares)
                 px = o2 * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
-                r_pnl = (px - pos.entry_px) * pos.shares / pos.R
+                risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
+                cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+                r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                
+
                 day_r += r_pnl
                 week_r += r_pnl
                 log_trade(nxt, sym, "WeeklyExit", px, pos.shares, r_pnl)
@@ -180,10 +185,14 @@ def portfolio_backtest_pro(
             )
 
             if evt == "STOP":
+                qty = float(pos.shares)
                 px = float(lvl) * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
-                r_pnl = (px - pos.entry_px) * pos.shares / pos.R
+                risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
+                cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+                r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                
                 day_r += r_pnl
                 week_r += r_pnl
                 log_trade(nxt, sym, "Stop", px, pos.shares, r_pnl)
@@ -196,7 +205,10 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
-                    r_pnl = (px - pos.entry_px) * qty / pos.R
+                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
+                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+                    r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+
                     day_r += r_pnl
                     week_r += r_pnl
                     pos.shares -= qty
@@ -216,7 +228,10 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
-                    r_pnl = (px - pos.entry_px) * qty / pos.R
+                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
+                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+                    r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+
                     day_r += r_pnl
                     week_r += r_pnl
                     pos.shares -= qty
