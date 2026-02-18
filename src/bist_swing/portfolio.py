@@ -97,6 +97,11 @@ def portfolio_backtest_pro(
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
     trades: List[tuple] = []
+
+    def log_trade(dt, ticker: str, typ: str, px: float, shares: float, r_pnl: float = 0.0) -> None:
+        notional = float(shares) * float(px) if np.isfinite(px) else np.nan
+        trades.append((dt, ticker, typ, float(px), float(shares), float(notional), float(r_pnl)))
+
     day_r = 0.0
     week_r = 0.0
     cur_day = None
@@ -154,7 +159,7 @@ def portfolio_backtest_pro(
                 r_pnl = (px - pos.entry_px) * pos.shares / pos.R
                 day_r += r_pnl
                 week_r += r_pnl
-                trades.append((nxt, sym, "WeeklyExit", px, pos.shares))
+                log_trade(nxt, sym, "WeeklyExit", px, pos.shares, r_pnl)
                 positions.pop(sym, None)
                 continue
 
@@ -181,7 +186,7 @@ def portfolio_backtest_pro(
                 r_pnl = (px - pos.entry_px) * pos.shares / pos.R
                 day_r += r_pnl
                 week_r += r_pnl
-                trades.append((nxt, sym, "Stop", px, pos.shares))
+                log_trade(nxt, sym, "Stop", px, pos.shares, r_pnl)
                 positions.pop(sym, None)
                 continue
 
@@ -197,7 +202,7 @@ def portfolio_backtest_pro(
                     pos.shares -= qty
                     pos.tp1 = True
                     pos.stop_px = pos.entry_px
-                    trades.append((nxt, sym, "TP1", px, qty))
+                    log_trade(nxt, sym, "TP1", px, qty, r_pnl)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -216,7 +221,7 @@ def portfolio_backtest_pro(
                     week_r += r_pnl
                     pos.shares -= qty
                     pos.tp2 = True
-                    trades.append((nxt, sym, "TP2", px, qty))
+                    log_trade(nxt, sym, "TP2", px, qty, r_pnl)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -344,10 +349,13 @@ def portfolio_backtest_pro(
                         shares=shares,
                         orig_shares=shares,
                     )
-                    trades.append((nxt, sym, "ENTRY", entry_px, shares))
+                    log_trade(nxt, sym, "ENTRY", entry_px, shares, 0.0)
 
     eqdf = pd.DataFrame(equity_rows, columns=["Date", "Equity", "Cash", "Npos"]).set_index("Date")
-    trdf = pd.DataFrame(trades, columns=["Date", "Ticker", "Type", "Px", "Shares"])
+    trdf = pd.DataFrame(
+    trades,
+    columns=["Date", "Ticker", "Type", "Px", "Shares", "Notional", "R_PnL"]
+)
 
     eqdf.to_csv(outdir / "equity_curve.csv")
     trdf.to_csv(outdir / "trades.csv", index=False)
