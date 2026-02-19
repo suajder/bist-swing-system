@@ -54,6 +54,76 @@ def zscore(x: pd.Series) -> pd.Series:
         return x * 0.0
     return (x - mu) / sd
 
+def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
+    """
+    Compute R-based performance summary from trade log.
+    Expects columns: Type, R_PnL
+    We summarize EXIT trades (non-ENTRY) by default.
+    """
+    if trdf.empty or "R_PnL" not in trdf.columns or "Type" not in trdf.columns:
+        return {}
+
+    # exits only (ENTRY has 0 by design)
+    ex = trdf[trdf["Type"] != "ENTRY"].copy()
+    if ex.empty:
+        return {}
+
+    r = ex["R_PnL"].astype(float).replace([np.inf, -np.inf], np.nan).dropna()
+    if r.empty:
+        return {}
+
+    n = float(len(r))
+    total_r = float(r.sum())
+    avg_r = float(r.mean())
+    med_r = float(r.median())
+
+    wins = r[r > 0]
+    losses = r[r < 0]
+
+    win_rate = float((r > 0).mean())
+    avg_win = float(wins.mean()) if len(wins) else 0.0
+    avg_loss = float(losses.mean()) if len(losses) else 0.0  # negative
+    expectancy = float(win_rate * avg_win + (1.0 - win_rate) * avg_loss)
+
+    # cumulative R & max drawdown in R
+    cum = r.cumsum()
+    peak = cum.cummax()
+    dd = cum - peak
+    max_dd_r = float(dd.min())  # negative
+
+    # max consecutive loss streak (in R and count)
+    loss_mask = (r < 0).to_numpy()
+    max_streak = 0
+    cur = 0
+    for v in loss_mask:
+        if v:
+            cur += 1
+            max_streak = max(max_streak, cur)
+        else:
+            cur = 0
+
+    # max consecutive loss sum (most negative contiguous sum)
+    # (Kadane variant on losses only)
+    min_ending = 0.0
+    min_so_far = 0.0
+    for x in r.to_numpy():
+        min_ending = min(0.0, min_ending + float(x))
+        min_so_far = min(min_so_far, min_ending)
+    max_consec_loss_r = float(min_so_far)  # negative
+
+    return {
+        "n_exits": n,
+        "total_R": total_r,
+        "avg_R": avg_r,
+        "median_R": med_r,
+        "win_rate": win_rate,
+        "avg_win_R": avg_win,
+        "avg_loss_R": avg_loss,
+        "expectancy_R": expectancy,
+        "max_dd_R": max_dd_r,
+        "max_loss_streak_n": float(max_streak),
+        "max_consec_loss_R": max_consec_loss_r,
+    }
 
 @dataclass
 class _Pos:
@@ -371,6 +441,18 @@ def portfolio_backtest_pro(
     trades,
     columns=["Date", "Ticker", "Type", "Px", "Shares", "Notional", "R_PnL"]
 )
+        # --- R summary ---
+    rsum = r_summary(trdf)
+
+    if rsum:
+        pd.Series(rsum).to_csv(outdir / "r_summary.csv", header=False)
+        # küçük bir “gözle kontrol” için
+        print("\n=== R SUMMARY (exits) ===")
+        for k, v in rsum.items():
+            if "rate" in k:
+                print(f"{k:18s}: {v*100:6.2f}%")
+            else:
+                print(f"{k:18s}: {v: .4f}")
 
     eqdf.to_csv(outdir / "equity_curve.csv")
     trdf.to_csv(outdir / "trades.csv", index=False)
