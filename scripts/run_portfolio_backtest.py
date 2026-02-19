@@ -1,11 +1,10 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 
 import pandas as pd
 import numpy as np
-
 import yfinance as yf
 
 from bist_swing.portfolio import portfolio_backtest_pro, PortfolioParams
@@ -16,6 +15,7 @@ from bist_swing.backtest import BacktestParams
 ROOT = Path(__file__).resolve().parents[1]
 UNIVERSE_FILE = ROOT / "configs" / "universe.txt"
 OUTDIR = ROOT / "out" / "portfolio"
+FAILED_FILE = OUTDIR / "failed_tickers.txt"
 
 
 def read_universe(path: Path) -> List[str]:
@@ -28,8 +28,12 @@ def read_universe(path: Path) -> List[str]:
     return tickers
 
 
-def download_ohlc(ticker: str, start: str, end: str) -> pd.DataFrame:
-    df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
+def download_ohlc(ticker: str, start: str, end: Optional[str]) -> pd.DataFrame:
+    try:
+        df = yf.download(ticker, start=start, end=end, auto_adjust=False, progress=False)
+    except Exception:
+        return pd.DataFrame()
+
     if df is None or df.empty:
         return pd.DataFrame()
 
@@ -55,6 +59,8 @@ def add_adv20(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def main():
+    OUTDIR.mkdir(parents=True, exist_ok=True)
+
     if not UNIVERSE_FILE.exists():
         raise SystemExit(f"Universe file not found: {UNIVERSE_FILE}")
 
@@ -68,15 +74,21 @@ def main():
 
     print(f"Downloading {len(tickers)} tickers...")
     price_map: Dict[str, pd.DataFrame] = {}
+    failed: List[str] = []
+
     for t in tickers:
         df = download_ohlc(t, start=start, end=end)
         if df.empty:
+            failed.append(t)
             continue
         df = add_adv20(df)
         price_map[t] = df
 
     tickers_ok = sorted(price_map.keys())
     print(f"Downloaded OK: {len(tickers_ok)}/{len(tickers)}")
+    if failed:
+        print("Failed tickers:", failed)
+        (OUTDIR.parent / "failed_tickers.txt").write_text("\n".join(failed) + "\n", encoding="utf-8")
 
     if len(tickers_ok) < 5:
         raise SystemExit("Too few tickers downloaded; check tickers or network.")
@@ -85,7 +97,9 @@ def main():
     sp = SignalParams()
     bp = BacktestParams()
 
-    best_cfg_map: Dict[str, Tuple[SignalParams, BacktestParams]] = {t: (sp, bp) for t in tickers_ok}
+    best_cfg_map: Dict[str, Tuple[SignalParams, BacktestParams]] = {
+        t: (sp, bp) for t in tickers_ok
+    }
 
     # model score yoksa 0 ver (rank sadece RSI/MOM/ADV ile de çalışır)
     model_score_map = {t: 0.0 for t in tickers_ok}
