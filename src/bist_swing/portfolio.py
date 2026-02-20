@@ -13,6 +13,10 @@ from .reporting import plot_equity
 from .signals import SignalEngine, SignalParams
 
 
+# =========================
+# Params
+# =========================
+
 @dataclass(frozen=True)
 class PortfolioParams:
     # portfolio constraints
@@ -24,8 +28,8 @@ class PortfolioParams:
     # liquidity filter
     adv20_min: float = 50_000_000.0
 
-    # risk-based position sizing  
-    risk_pct: float = 0.02 # %2 risk per trade (balanced growth)
+    # risk-based position sizing
+    risk_pct: float = 0.02  # %2 risk per trade (balanced growth)
 
     daily_stop_R: float = 3.0
     weekly_stop_R: float = 6.0
@@ -39,6 +43,20 @@ class PortfolioParams:
     w_mom: float = 0.10
     w_adv: float = 0.05
 
+    # --- Entry quality filters ---
+    trend_fast: int = 50
+    trend_slow: int = 200
+
+    benchmark: str = "XU100.IS"
+    rs_lookback: int = 126      # ~6 ay
+
+    atr_n: int = 14
+    min_atr_pct: float = 0.02   # ATR/Close alt eşiği
+
+
+# =========================
+# Utils
+# =========================
 
 def safe_float(x, default=np.nan) -> float:
     try:
@@ -54,6 +72,56 @@ def zscore(x: pd.Series) -> pd.Series:
         return x * 0.0
     return (x - mu) / sd
 
+
+def add_trend_cols(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
+    out = df.copy()
+    out["SMA_FAST"] = out["Close"].rolling(fast).mean()
+    out["SMA_SLOW"] = out["Close"].rolling(slow).mean()
+    out["trend_ok"] = (out["Close"] > out["SMA_SLOW"]) & (out["SMA_FAST"] > out["SMA_SLOW"])
+    return out
+
+
+def add_atr_cols(df: pd.DataFrame, n: int) -> pd.DataFrame:
+    out = df.copy()
+    h = out["High"]
+    l = out["Low"]
+    c = out["Close"]
+    prev_c = c.shift(1)
+
+    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
+    out["ATR"] = tr.rolling(n).mean()
+    out["atr_pct"] = out["ATR"] / out["Close"]
+    out["atr_ok"] = out["atr_pct"] >= 0.0  # threshold later
+    return out
+
+
+def add_rs_cols(df: pd.DataFrame, bench: pd.DataFrame, lookback: int) -> pd.DataFrame:
+    out = df.copy()
+    sym_ret = out["Close"] / out["Close"].shift(lookback)
+    ben_ret = bench["Close"] / bench["Close"].shift(lookback)
+    out["rs"] = (sym_ret / ben_ret) - 1.0
+    out["rs_ok"] = out["rs"] > 0.0
+    return out
+
+
+def eligible(df: pd.DataFrame, t, min_atr_pct: float) -> bool:
+    if df is None or t not in df.index:
+        return False
+    row = df.loc[t]
+    if not bool(row.get("trend_ok", False)):
+        return False
+    if not bool(row.get("rs_ok", True)):   # benchmark yoksa default True
+        return False
+    atr_pct = row.get("atr_pct", np.nan)
+    if not (np.isfinite(atr_pct) and float(atr_pct) >= float(min_atr_pct)):
+        return False
+    return True
+
+
+# =========================
+# R summary
+# =========================
+
 def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
     """
     Compute R-based performance summary from trade log.
@@ -63,7 +131,6 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
     if trdf.empty or "R_PnL" not in trdf.columns or "Type" not in trdf.columns:
         return {}
 
-    # exits only (ENTRY has 0 by design)
     ex = trdf[trdf["Type"] != "ENTRY"].copy()
     if ex.empty:
         return {}
@@ -82,16 +149,14 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
 
     win_rate = float((r > 0).mean())
     avg_win = float(wins.mean()) if len(wins) else 0.0
-    avg_loss = float(losses.mean()) if len(losses) else 0.0  # negative
+    avg_loss = float(losses.mean()) if len(losses) else 0.0
     expectancy = float(win_rate * avg_win + (1.0 - win_rate) * avg_loss)
 
-    # cumulative R & max drawdown in R
     cum = r.cumsum()
     peak = cum.cummax()
     dd = cum - peak
-    max_dd_r = float(dd.min())  # negative
+    max_dd_r = float(dd.min())
 
-    # max consecutive loss streak (in R and count)
     loss_mask = (r < 0).to_numpy()
     max_streak = 0
     cur = 0
@@ -102,14 +167,12 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
         else:
             cur = 0
 
-    # max consecutive loss sum (most negative contiguous sum)
-    # (Kadane variant on losses only)
     min_ending = 0.0
     min_so_far = 0.0
     for x in r.to_numpy():
         min_ending = min(0.0, min_ending + float(x))
         min_so_far = min(min_so_far, min_ending)
-    max_consec_loss_r = float(min_so_far)  # negative
+    max_consec_loss_r = float(min_so_far)
 
     return {
         "n_exits": n,
@@ -125,8 +188,10 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
         "max_consec_loss_R": max_consec_loss_r,
     }
 
+
 @dataclass
 class _Pos:
+    trade_id: int
     entry_px: float
     stop_px: float
     R: float
@@ -135,6 +200,10 @@ class _Pos:
     tp1: bool = False
     tp2: bool = False
 
+
+# =========================
+# Main
+# =========================
 
 def portfolio_backtest_pro(
     *,
@@ -153,6 +222,28 @@ def portfolio_backtest_pro(
     start_dt = pd.to_datetime(test_start)
     end_dt = pd.to_datetime(test_end) if test_end else None
 
+    # --- preprocess price dfs: trend/atr/rs ---
+    bench_df = price_map.get(pparams.benchmark, None)
+    if bench_df is not None:
+        bench_df = bench_df.sort_index()
+
+    for sym in tickers:
+        df = price_map[sym].sort_index()
+        df = add_trend_cols(df, pparams.trend_fast, pparams.trend_slow)
+        df = add_atr_cols(df, pparams.atr_n)
+
+        # apply atr threshold flag
+        df["atr_ok"] = df["atr_pct"] >= float(pparams.min_atr_pct)
+
+        # relative strength (if benchmark exists)
+        if bench_df is not None and "Close" in bench_df.columns:
+            df = add_rs_cols(df, bench_df, pparams.rs_lookback)
+        else:
+            df["rs"] = np.nan
+            df["rs_ok"] = True  # benchmark yoksa filtreyi devre dışı bırak
+
+        price_map[sym] = df
+
     # build signals per ticker (full history)
     sig_map = {t: se.build(price_map[t], best_cfg_map[t][0]) for t in tickers}
 
@@ -166,11 +257,15 @@ def portfolio_backtest_pro(
 
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
+
+    next_trade_id = 1
+
+    # trades: Date, Ticker, Type, Px, Shares, Notional, R_PnL, R_Leg
     trades: List[tuple] = []
 
-    def log_trade(dt, ticker: str, typ: str, px: float, shares: float, r_pnl: float = 0.0) -> None:
+    def log_trade(dt, ticker: str, trade_id: int, typ: str, px: float, shares: float, r_pnl: float = 0.0) -> None:
         notional = float(shares) * float(px) if np.isfinite(px) else np.nan
-        trades.append((dt, ticker, typ, float(px), float(shares), float(notional), float(r_pnl)))
+        trades.append((dt, ticker, int(trade_id), typ, float(px), float(shares), float(notional), float(r_pnl)))
 
     day_r = 0.0
     week_r = 0.0
@@ -178,7 +273,7 @@ def portfolio_backtest_pro(
     cur_week = None
     equity_rows: List[tuple] = []
 
-    # Use params from first ticker for costs (or could keep per-ticker)
+    # costs (use params from first ticker)
     any_bp = best_cfg_map[tickers[0]][1]
     slip = any_bp.slippage_bps / 10000.0
     fee = any_bp.fee_bps / 10000.0
@@ -222,24 +317,38 @@ def portfolio_backtest_pro(
             l2 = float(df.loc[nxt, "Low"])
 
             # weekly exit
+            # weekly exit -> partial (reduce tail risk) + stop tighten
             if bool(sig.loc[t, "w_exit_regime"]):
-                qty = float(pos.shares)
-                px = o2 * (1 - slip)
-                proceeds = pos.shares * px * (1 - fee)
-                cash += proceeds
-                risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
-                cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
-                r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
-                
+                qty = float(pos.shares) * 0.5  # %50 çık
+                if qty > 0:
+                    px = o2 * (1 - slip)
+                    proceeds = qty * px * (1 - fee)
+                    cash += proceeds
 
-                day_r += r_pnl
-                week_r += r_pnl
-                log_trade(nxt, sym, "WeeklyExit", px, pos.shares, r_pnl)
-                positions.pop(sym, None)
+                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL risk bütçesi (trade)
+                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
+                    r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+
+                    day_r += r_pnl
+                    week_r += r_pnl
+
+                    pos.shares -= qty
+
+                    # stop tighten: EMA20 altına çek (kötü haftada risk azalt)
+                    ema20 = safe_float(sig.loc[t, "d_ema20"], np.nan)
+                    if np.isfinite(ema20):
+                        pos.stop_px = max(float(pos.stop_px), float(ema20))
+
+                    log_trade(nxt, sym, "WeeklyPartial", px, qty, r_pnl)
+
+                if pos.shares <= 1e-12:
+                    positions.pop(sym, None)
+                else:
+                    positions[sym] = pos
+
                 continue
 
-            # Unified intrabar resolution (same as live/backtest):
-            # closest-to-open first, tie-break STOP (conservative)
+            # Unified intrabar resolution
             tp1 = pos.entry_px + bp.tp1_R * pos.R
             tp2 = pos.entry_px + bp.tp2_R * pos.R
 
@@ -259,13 +368,15 @@ def portfolio_backtest_pro(
                 px = float(lvl) * (1 - slip)
                 proceeds = pos.shares * px * (1 - fee)
                 cash += proceeds
-                risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
-                cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+
+                risk_ref = float(pos.orig_shares) * float(pos.R)
+                cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
                 r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
-                
+                r_leg = (float(px) - float(pos.entry_px)) / float(pos.R) if (np.isfinite(pos.R) and pos.R > 0) else 0.0
+
                 day_r += r_pnl
                 week_r += r_pnl
-                log_trade(nxt, sym, "Stop", px, pos.shares, r_pnl)
+                log_trade(nxt, sym, "Stop", px, pos.shares, r_pnl, r_leg)
                 positions.pop(sym, None)
                 continue
 
@@ -275,16 +386,18 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
-                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
-                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+
+                    risk_ref = float(pos.orig_shares) * float(pos.R)
+                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
                     r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                    r_leg = (float(px) - float(pos.entry_px)) / float(pos.R) if (np.isfinite(pos.R) and pos.R > 0) else 0.0
 
                     day_r += r_pnl
                     week_r += r_pnl
                     pos.shares -= qty
                     pos.tp1 = True
                     pos.stop_px = pos.entry_px
-                    log_trade(nxt, sym, "TP1", px, qty, r_pnl)
+                    log_trade(nxt, sym, "TP1", px, qty, r_pnl, r_leg)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -298,15 +411,17 @@ def portfolio_backtest_pro(
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
-                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL cinsinden trade risk bütçesi
-                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)  # TL pnl (leg)
+
+                    risk_ref = float(pos.orig_shares) * float(pos.R)
+                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
                     r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                    r_leg = (float(px) - float(pos.entry_px)) / float(pos.R) if (np.isfinite(pos.R) and pos.R > 0) else 0.0
 
                     day_r += r_pnl
                     week_r += r_pnl
                     pos.shares -= qty
                     pos.tp2 = True
-                    log_trade(nxt, sym, "TP2", px, qty, r_pnl)
+                    log_trade(nxt, sym, "TP2", px, qty, r_pnl, r_leg)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -314,13 +429,15 @@ def portfolio_backtest_pro(
                     positions[sym] = pos
                 continue
 
-            # no exit on this bar
+            # no exit
             if pos.shares <= 1e-12:
                 positions.pop(sym, None)
             else:
                 positions[sym] = pos
 
-        # entries: build candidate list at t, fill next open
+        # =========================
+        # Entries
+        # =========================
         killsw = (day_r <= -pparams.daily_stop_R) or (week_r <= -pparams.weekly_stop_R)
 
         cap = pparams.max_open - len(positions)
@@ -330,13 +447,19 @@ def portfolio_backtest_pro(
             for sym in tickers:
                 if sym in positions:
                     continue
+                if sym == pparams.benchmark:
+                    continue
+
                 df = price_map[sym]
                 sig = sig_map[sym]
+
                 if t in sig.index and bool(sig.loc[t, "entry_signal"]):
                     if t in df.index:
                         adv20 = safe_float(df.loc[t, "ADV20"], np.nan)
                         if np.isfinite(adv20) and adv20 >= pparams.adv20_min:
-                            cands.append(sym)
+                            # --- quality filters (trend + RS + ATR%) ---
+                            if eligible(df, t, pparams.min_atr_pct):
+                                cands.append(sym)
 
             if cands:
                 # rank cands by composite score
@@ -391,28 +514,44 @@ def portfolio_backtest_pro(
                     if not np.isfinite(R) or R <= 0:
                         continue
 
-                    # --- Risk-based position sizing (% risk of equity) ---
-                    risk_amt = eq_now * float(pparams.risk_pct)
+                    # risk-based sizing
+                    # --- Dynamic risk throttling (soft throttle) ---
+                    risk_pct_dyn = float(pparams.risk_pct)
+
+                    # Haftalık loss cluster varsa risk düşür
+                    if week_r <= -2.0:
+                        risk_pct_dyn = min(risk_pct_dyn, 0.015)
+                    if week_r <= -4.0:
+                        risk_pct_dyn = min(risk_pct_dyn, 0.010)
+
+                    # Çok kötüleşirse yeni entry yok (hard kill zaten var ama bu daha erken)
+                    if week_r <= -5.0:
+                        risk_pct_dyn = 0.0
+
+                    if risk_pct_dyn <= 0.0:
+                        continue
+
+                    risk_amt = eq_now * risk_pct_dyn
                     shares_risk = np.floor(risk_amt / R)
 
                     if (not np.isfinite(shares_risk)) or shares_risk < 1:
                         continue
 
-                    # cap by diversification slot (avoid concentration)
+                    # cap by slot
                     shares_slot = np.floor(slot / entry_px)
                     if (not np.isfinite(shares_slot)) or shares_slot < 1:
                         continue
 
+                    # cap by max notional
                     max_notional = eq_now * pparams.max_notional_pct
                     shares_notional = np.floor(max_notional / entry_px)
                     if (not np.isfinite(shares_notional)) or shares_notional < 1:
                         continue
 
-                    # cap by cash affordability (include fee)
+                    # cap by cash affordability
                     cash_buffer = eq_now * pparams.min_cash_buffer_pct
                     available_cash = max(0.0, cash - cash_buffer)
                     shares_cash = np.floor(available_cash / (entry_px * (1.0 + fee)))
-
                     if (not np.isfinite(shares_cash)) or shares_cash < 1:
                         continue
 
@@ -428,25 +567,30 @@ def portfolio_backtest_pro(
 
                     cash -= total_cost
                     positions[sym] = _Pos(
+                        trade_id=next_trade_id,
                         entry_px=entry_px,
                         stop_px=stop_px,
                         R=R,
                         shares=shares,
                         orig_shares=shares,
                     )
-                    log_trade(nxt, sym, "ENTRY", entry_px, shares, 0.0)
+                    next_trade_id += 1
 
+                    log_trade(nxt, sym, next_trade_id, "ENTRY", entry_px, shares, 0.0)
+
+    # =========================
+    # Outputs
+    # =========================
     eqdf = pd.DataFrame(equity_rows, columns=["Date", "Equity", "Cash", "Npos"]).set_index("Date")
     trdf = pd.DataFrame(
-    trades,
-    columns=["Date", "Ticker", "Type", "Px", "Shares", "Notional", "R_PnL"]
-)
-        # --- R summary ---
-    rsum = r_summary(trdf)
+        trades,
+        columns=["Date", "Ticker", "Type", "Px", "Shares", "Notional", "R_PnL", "R_Leg"],
+    )
 
+    # R summary
+    rsum = r_summary(trdf)
     if rsum:
         pd.Series(rsum).to_csv(outdir / "r_summary.csv", header=False)
-        # küçük bir “gözle kontrol” için
         print("\n=== R SUMMARY (exits) ===")
         for k, v in rsum.items():
             if "rate" in k:
