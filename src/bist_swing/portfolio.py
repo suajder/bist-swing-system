@@ -191,6 +191,7 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
 
 @dataclass
 class _Pos:
+    trade_id: int
     entry_px: float
     stop_px: float
     R: float
@@ -257,12 +258,14 @@ def portfolio_backtest_pro(
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
 
+    next_trade_id = 1
+
     # trades: Date, Ticker, Type, Px, Shares, Notional, R_PnL, R_Leg
     trades: List[tuple] = []
 
-    def log_trade(dt, ticker: str, typ: str, px: float, shares: float, r_pnl: float = 0.0, r_leg: float = 0.0) -> None:
+    def log_trade(dt, ticker: str, trade_id: int, typ: str, px: float, shares: float, r_pnl: float = 0.0) -> None:
         notional = float(shares) * float(px) if np.isfinite(px) else np.nan
-        trades.append((dt, ticker, typ, float(px), float(shares), float(notional), float(r_pnl), float(r_leg)))
+        trades.append((dt, ticker, int(trade_id), typ, float(px), float(shares), float(notional), float(r_pnl)))
 
     day_r = 0.0
     week_r = 0.0
@@ -564,13 +567,16 @@ def portfolio_backtest_pro(
 
                     cash -= total_cost
                     positions[sym] = _Pos(
+                        trade_id=next_trade_id,
                         entry_px=entry_px,
                         stop_px=stop_px,
                         R=R,
                         shares=shares,
                         orig_shares=shares,
                     )
-                    log_trade(nxt, sym, "ENTRY", entry_px, shares, 0.0, 0.0)
+                    next_trade_id += 1
+
+                    log_trade(nxt, sym, next_trade_id, "ENTRY", entry_px, shares, 0.0)
 
     # =========================
     # Outputs
