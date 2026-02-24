@@ -28,3 +28,8 @@ signals_state.json
 *.egg-info/
 _smoke_*.py
 
+
+# Runtime outputs
+out/
+configs/universe.txt.bak
+
