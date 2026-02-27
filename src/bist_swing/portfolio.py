@@ -13,9 +13,9 @@ from .reporting import plot_equity
 from .signals import SignalEngine, SignalParams
 
 
-# =========================
+# ============================================================
 # Params
-# =========================
+# ============================================================
 
 @dataclass(frozen=True)
 class PortfolioParams:
@@ -25,17 +25,26 @@ class PortfolioParams:
     # starting capital
     initial_equity: float = 50_000.0
 
-    # liquidity filter
+    # liquidity filter (20d avg traded value)
     adv20_min: float = 50_000_000.0
 
     # risk-based position sizing
-    risk_pct: float = 0.02  # %2 risk per trade (balanced growth)
+    risk_pct: float = 0.02  # base risk (balanced)
 
+    # hard kill-switch (portfolio-level)
     daily_stop_R: float = 3.0
     weekly_stop_R: float = 6.0
 
-    max_notional_pct: float = 0.35       # equity'nin max %35'i tek pozisyona
-    min_cash_buffer_pct: float = 0.05    # equity'nin %5'i nakitte kalsın
+    # soft throttling (reduce risk when week is negative)
+    throttle_w1_R: float = 2.0   # week_r <= -2R -> risk 1.5%
+    throttle_w2_R: float = 4.0   # week_r <= -4R -> risk 1.0%
+    throttle_risk1: float = 0.015
+    throttle_risk2: float = 0.010
+    throttle_block_R: float = 5.0  # week_r <= -5R -> no new entries (soft block)
+
+    # concentration + cash buffer
+    max_notional_pct: float = 0.35       # max % per position
+    min_cash_buffer_pct: float = 0.05    # keep % cash buffer
 
     # ranking weights
     w_model: float = 1.0
@@ -43,20 +52,25 @@ class PortfolioParams:
     w_mom: float = 0.10
     w_adv: float = 0.05
 
-    # --- Entry quality filters ---
-    trend_fast: int = 50
-    trend_slow: int = 200
+    # trend filter
+    trend_fast: int = 20
+    trend_slow: int = 50
 
-    benchmark: str = "XU100.IS"
-    rs_lookback: int = 126      # ~6 ay
-
+    # ATR filter
     atr_n: int = 14
-    min_atr_pct: float = 0.02   # ATR/Close alt eşiği
+    min_atr_pct: float = 0.0  # e.g. 0.01 -> 1%
+
+    # volatility filters (ATR% band)
+    min_atr_pct: float = 0.010   # 1.0%
+    max_atr_pct: float = 0.060   # 6.0%
+
+    # re-entry cooldown after STOP (days)
+    stop_cooldown_days: int = 10
 
 
-# =========================
+# ============================================================
 # Utils
-# =========================
+# ============================================================
 
 def safe_float(x, default=np.nan) -> float:
     try:
@@ -68,16 +82,18 @@ def safe_float(x, default=np.nan) -> float:
 def zscore(x: pd.Series) -> pd.Series:
     mu = x.mean()
     sd = x.std(ddof=0)
-    if sd == 0 or not np.isfinite(sd):
+    if (not np.isfinite(sd)) or sd == 0:
         return x * 0.0
     return (x - mu) / sd
 
 
 def add_trend_cols(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
     out = df.copy()
-    out["SMA_FAST"] = out["Close"].rolling(fast).mean()
-    out["SMA_SLOW"] = out["Close"].rolling(slow).mean()
-    out["trend_ok"] = (out["Close"] > out["SMA_SLOW"]) & (out["SMA_FAST"] > out["SMA_SLOW"])
+    out["ema_fast"] = out["Close"].ewm(span=int(fast), adjust=False).mean()
+    out["ema_slow"] = out["Close"].ewm(span=int(slow), adjust=False).mean()
+    out["trend_up"] = out["ema_fast"] > out["ema_slow"]
+    # used in weekly partial stop tighten
+    out["EMA20"] = out["Close"].ewm(span=20, adjust=False).mean()
     return out
 
 
@@ -89,44 +105,16 @@ def add_atr_cols(df: pd.DataFrame, n: int) -> pd.DataFrame:
     prev_c = c.shift(1)
 
     tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    out["ATR"] = tr.rolling(n).mean()
+    out["ATR"] = tr.rolling(int(n)).mean()
     out["atr_pct"] = out["ATR"] / out["Close"]
-    out["atr_ok"] = out["atr_pct"] >= 0.0  # threshold later
     return out
 
-
-def add_rs_cols(df: pd.DataFrame, bench: pd.DataFrame, lookback: int) -> pd.DataFrame:
-    out = df.copy()
-    sym_ret = out["Close"] / out["Close"].shift(lookback)
-    ben_ret = bench["Close"] / bench["Close"].shift(lookback)
-    out["rs"] = (sym_ret / ben_ret) - 1.0
-    out["rs_ok"] = out["rs"] > 0.0
-    return out
-
-
-def eligible(df: pd.DataFrame, t, min_atr_pct: float) -> bool:
-    if df is None or t not in df.index:
-        return False
-    row = df.loc[t]
-    if not bool(row.get("trend_ok", False)):
-        return False
-    if not bool(row.get("rs_ok", True)):   # benchmark yoksa default True
-        return False
-    atr_pct = row.get("atr_pct", np.nan)
-    if not (np.isfinite(atr_pct) and float(atr_pct) >= float(min_atr_pct)):
-        return False
-    return True
-
-
-# =========================
-# R summary
-# =========================
 
 def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
     """
     Compute R-based performance summary from trade log.
     Expects columns: Type, R_PnL
-    We summarize EXIT trades (non-ENTRY) by default.
+    Summarizes EXIT legs (Type != ENTRY).
     """
     if trdf.empty or "R_PnL" not in trdf.columns or "Type" not in trdf.columns:
         return {}
@@ -149,7 +137,7 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
 
     win_rate = float((r > 0).mean())
     avg_win = float(wins.mean()) if len(wins) else 0.0
-    avg_loss = float(losses.mean()) if len(losses) else 0.0
+    avg_loss = float(losses.mean()) if len(losses) else 0.0  # negative
     expectancy = float(win_rate * avg_win + (1.0 - win_rate) * avg_loss)
 
     cum = r.cumsum()
@@ -157,6 +145,7 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
     dd = cum - peak
     max_dd_r = float(dd.min())
 
+    # max consecutive losing count
     loss_mask = (r < 0).to_numpy()
     max_streak = 0
     cur = 0
@@ -167,6 +156,7 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
         else:
             cur = 0
 
+    # most negative contiguous sum (Kadane variant)
     min_ending = 0.0
     min_so_far = 0.0
     for x in r.to_numpy():
@@ -189,21 +179,35 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
     }
 
 
+def effective_risk_pct(pp: PortfolioParams, week_r: float) -> float:
+    """Soft throttling based on current weekly R."""
+    if week_r <= -float(pp.throttle_w2_R):
+        return float(pp.throttle_risk2)
+    if week_r <= -float(pp.throttle_w1_R):
+        return float(pp.throttle_risk1)
+    return float(pp.risk_pct)
+
+
+# ============================================================
+# Position
+# ============================================================
+
 @dataclass
 class _Pos:
     trade_id: int
     entry_px: float
     stop_px: float
-    R: float
+    R: float  # TL/share
     shares: float
     orig_shares: float
     tp1: bool = False
     tp2: bool = False
+    weekly_partial_done: bool = False
 
 
-# =========================
-# Main
-# =========================
+# ============================================================
+# Portfolio Backtest
+# ============================================================
 
 def portfolio_backtest_pro(
     *,
@@ -222,32 +226,21 @@ def portfolio_backtest_pro(
     start_dt = pd.to_datetime(test_start)
     end_dt = pd.to_datetime(test_end) if test_end else None
 
-    # --- preprocess price dfs: trend/atr/rs ---
-    bench_df = price_map.get(pparams.benchmark, None)
-    if bench_df is not None:
-        bench_df = bench_df.sort_index()
-
+    # Enrich price frames: ADV20 + trend + ATR
+    # (Assumes price_map already has OHLCV)
     for sym in tickers:
-        df = price_map[sym].sort_index()
+        df = price_map[sym].copy()
+        if "ADV20" not in df.columns:
+            df["ADV20"] = (df["Close"] * df["Volume"]).rolling(20).mean()
         df = add_trend_cols(df, pparams.trend_fast, pparams.trend_slow)
         df = add_atr_cols(df, pparams.atr_n)
-
-        # apply atr threshold flag
-        df["atr_ok"] = df["atr_pct"] >= float(pparams.min_atr_pct)
-
-        # relative strength (if benchmark exists)
-        if bench_df is not None and "Close" in bench_df.columns:
-            df = add_rs_cols(df, bench_df, pparams.rs_lookback)
-        else:
-            df["rs"] = np.nan
-            df["rs_ok"] = True  # benchmark yoksa filtreyi devre dışı bırak
-
+        df["atr_ok"] = (df["atr_pct"] >= float(pparams.min_atr_pct)) & (df["atr_pct"] <= float(pparams.max_atr_pct))
         price_map[sym] = df
 
     # build signals per ticker (full history)
     sig_map = {t: se.build(price_map[t], best_cfg_map[t][0]) for t in tickers}
 
-    # common calendar: use first ticker
+    # common calendar: first ticker
     cal = price_map[tickers[0]].index
     cal = cal[cal >= start_dt]
     if end_dt is not None:
@@ -257,15 +250,36 @@ def portfolio_backtest_pro(
 
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
-
     next_trade_id = 1
+    last_stop_date: Dict[str, pd.Timestamp] = {}
 
-    # trades: Date, Ticker, Type, Px, Shares, Notional, R_PnL, R_Leg
+    # trades: Date, Ticker, TradeID, Type, Px, Shares, Notional, R_PnL, R_Leg
     trades: List[tuple] = []
 
-    def log_trade(dt, ticker: str, trade_id: int, typ: str, px: float, shares: float, r_pnl: float = 0.0) -> None:
+    def log_trade(
+        dt,
+        ticker: str,
+        trade_id: int,
+        typ: str,
+        px: float,
+        shares: float,
+        r_pnl: float = 0.0,
+        r_leg: float = 0.0,
+    ) -> None:
         notional = float(shares) * float(px) if np.isfinite(px) else np.nan
-        trades.append((dt, ticker, int(trade_id), typ, float(px), float(shares), float(notional), float(r_pnl)))
+        trades.append(
+            (
+                dt,
+                ticker,
+                int(trade_id),
+                typ,
+                float(px),
+                float(shares),
+                float(notional),
+                float(r_pnl),
+                float(r_leg),
+            )
+        )
 
     day_r = 0.0
     week_r = 0.0
@@ -273,13 +287,14 @@ def portfolio_backtest_pro(
     cur_week = None
     equity_rows: List[tuple] = []
 
-    # costs (use params from first ticker)
+    # costs from first ticker's backtest params
     any_bp = best_cfg_map[tickers[0]][1]
-    slip = any_bp.slippage_bps / 10000.0
-    fee = any_bp.fee_bps / 10000.0
+    slip = float(any_bp.slippage_bps) / 10000.0
+    fee = float(any_bp.fee_bps) / 10000.0
 
     for i in range(len(cal) - 1):
         t = cal[i]
+        nxt = cal[i + 1]
 
         d = pd.Timestamp(t).date()
         w = pd.Timestamp(t).isocalendar().week
@@ -292,9 +307,7 @@ def portfolio_backtest_pro(
             cur_week = w
             week_r = 0.0
 
-        nxt = cal[i + 1]
-
-        # mark-to-market close
+        # mark-to-market equity at close(t)
         eq = cash
         for sym, pos in positions.items():
             df = price_map[sym]
@@ -302,55 +315,63 @@ def portfolio_backtest_pro(
                 eq += pos.shares * float(df.loc[t, "Close"])
         equity_rows.append((t, eq, cash, len(positions)))
 
-        # manage exits on nxt OHLC
+        # =========================
+        # Exits (executed on nxt bar)
+        # =========================
         for sym in list(positions.keys()):
             pos = positions[sym]
             df = price_map[sym]
             sig = sig_map[sym]
             _, bp = best_cfg_map[sym]
 
-            if t not in df.index or nxt not in df.index or t not in sig.index:
+            if (t not in df.index) or (nxt not in df.index) or (t not in sig.index):
                 continue
 
             o2 = float(df.loc[nxt, "Open"])
             h2 = float(df.loc[nxt, "High"])
             l2 = float(df.loc[nxt, "Low"])
 
-            # weekly exit
-            # weekly exit -> partial (reduce tail risk) + stop tighten
-            if bool(sig.loc[t, "w_exit_regime"]):
-                qty = float(pos.shares) * 0.5  # %50 çık
-                if qty > 0:
-                    px = o2 * (1 - slip)
-                    proceeds = qty * px * (1 - fee)
-                    cash += proceeds
+            # weekly exit -> partial + stop tighten (only once per trade)
+            # weekly exit -> R-based partial (only if >= +1R) + stop tighten
+            if bool(sig.loc[t, "w_exit_regime"]) and (not pos.weekly_partial_done):
 
-                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL risk bütçesi (trade)
-                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
-                    r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                # current R leg at next open
+                current_r_leg = (o2 - pos.entry_px) / pos.R if (np.isfinite(pos.R) and pos.R > 0) else 0.0
 
-                    day_r += r_pnl
-                    week_r += r_pnl
+                # tighten stop regardless
+                ema20 = safe_float(sig.loc[t, "d_ema20"], np.nan)
+                if np.isfinite(ema20):
+                    pos.stop_px = max(float(pos.stop_px), float(ema20))
 
-                    pos.shares -= qty
+                # only partial if >= +1R
+                if current_r_leg >= 1.0:
 
-                    # stop tighten: EMA20 altına çek (kötü haftada risk azalt)
-                    ema20 = safe_float(sig.loc[t, "d_ema20"], np.nan)
-                    if np.isfinite(ema20):
-                        pos.stop_px = max(float(pos.stop_px), float(ema20))
+                    qty = float(pos.shares) * (1.0 / 3.0)
+                    if qty > 0:
 
-                    log_trade(nxt, sym, "WeeklyPartial", px, qty, r_pnl)
+                        px = o2 * (1 - slip)
+                        proceeds = qty * px * (1 - fee)
+                        cash += proceeds
 
-                if pos.shares <= 1e-12:
-                    positions.pop(sym, None)
-                else:
-                    positions[sym] = pos
+                        risk_ref = float(pos.orig_shares) * float(pos.R)
+                        cash_pnl = (px - pos.entry_px) * qty
+                        r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                        r_leg = (px - pos.entry_px) / pos.R if (np.isfinite(pos.R) and pos.R > 0) else 0.0
 
+                        day_r += r_pnl
+                        week_r += r_pnl
+
+                        pos.shares -= qty
+                        pos.weekly_partial_done = True
+
+                        log_trade(nxt, sym, pos.trade_id, "WeeklyPartial", px, qty, r_pnl, r_leg)
+
+                positions[sym] = pos
                 continue
 
-            # Unified intrabar resolution
-            tp1 = pos.entry_px + bp.tp1_R * pos.R
-            tp2 = pos.entry_px + bp.tp2_R * pos.R
+            # Unified intrabar resolution (same as live/backtest):
+            tp1 = float(pos.entry_px) + float(bp.tp1_R) * float(pos.R)
+            tp2 = float(pos.entry_px) + float(bp.tp2_R) * float(pos.R)
 
             evt, lvl, _extra = resolve_intrabar_exit(
                 o2=o2,
@@ -366,7 +387,7 @@ def portfolio_backtest_pro(
             if evt == "STOP":
                 qty = float(pos.shares)
                 px = float(lvl) * (1 - slip)
-                proceeds = pos.shares * px * (1 - fee)
+                proceeds = qty * px * (1 - fee)
                 cash += proceeds
 
                 risk_ref = float(pos.orig_shares) * float(pos.R)
@@ -376,12 +397,13 @@ def portfolio_backtest_pro(
 
                 day_r += r_pnl
                 week_r += r_pnl
-                log_trade(nxt, sym, "Stop", px, pos.shares, r_pnl, r_leg)
+                log_trade(nxt, sym, pos.trade_id, "Stop", px, qty, r_pnl, r_leg)
+                last_stop_date[sym] = pd.Timestamp(nxt)
                 positions.pop(sym, None)
                 continue
 
             if evt == "TP1":
-                qty = min(pos.orig_shares / 3.0, pos.shares)
+                qty = min(float(pos.orig_shares) / 3.0, float(pos.shares))
                 if qty > 0:
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
@@ -394,10 +416,12 @@ def portfolio_backtest_pro(
 
                     day_r += r_pnl
                     week_r += r_pnl
+
                     pos.shares -= qty
                     pos.tp1 = True
-                    pos.stop_px = pos.entry_px
-                    log_trade(nxt, sym, "TP1", px, qty, r_pnl, r_leg)
+                    pos.stop_px = pos.entry_px  # breakeven after TP1
+
+                    log_trade(nxt, sym, pos.trade_id, "TP1", px, qty, r_pnl, r_leg)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -406,7 +430,7 @@ def portfolio_backtest_pro(
                 continue
 
             if evt == "TP2":
-                qty = min(pos.orig_shares / 3.0, pos.shares)
+                qty = min(float(pos.orig_shares) / 3.0, float(pos.shares))
                 if qty > 0:
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
@@ -419,9 +443,11 @@ def portfolio_backtest_pro(
 
                     day_r += r_pnl
                     week_r += r_pnl
+
                     pos.shares -= qty
                     pos.tp2 = True
-                    log_trade(nxt, sym, "TP2", px, qty, r_pnl, r_leg)
+
+                    log_trade(nxt, sym, pos.trade_id, "TP2", px, qty, r_pnl, r_leg)
 
                 if pos.shares <= 1e-12:
                     positions.pop(sym, None)
@@ -436,33 +462,36 @@ def portfolio_backtest_pro(
                 positions[sym] = pos
 
         # =========================
-        # Entries
+        # Entries (signals at t -> fill at nxt open)
         # =========================
-        killsw = (day_r <= -pparams.daily_stop_R) or (week_r <= -pparams.weekly_stop_R)
+        hard_kill = (day_r <= -pparams.daily_stop_R) or (week_r <= -pparams.weekly_stop_R)
+        soft_block = week_r <= -float(pparams.throttle_block_R)
+        cap = int(pparams.max_open) - len(positions)
 
-        cap = pparams.max_open - len(positions)
-        if (cap > 0) and (not killsw):
-
+        if (cap > 0) and (not hard_kill) and (not soft_block):
+            # candidate selection
             cands: List[str] = []
             for sym in tickers:
                 if sym in positions:
                     continue
-                if sym == pparams.benchmark:
-                    continue
-
                 df = price_map[sym]
                 sig = sig_map[sym]
-
-                if t in sig.index and bool(sig.loc[t, "entry_signal"]):
+                # cooldown after stop
+                if sym in last_stop_date:
+                    if (pd.Timestamp(t) - last_stop_date[sym]).days < int(pparams.stop_cooldown_days):
+                        continue
+                if (t in sig.index) and bool(sig.loc[t, "entry_signal"]):
                     if t in df.index:
                         adv20 = safe_float(df.loc[t, "ADV20"], np.nan)
-                        if np.isfinite(adv20) and adv20 >= pparams.adv20_min:
-                            # --- quality filters (trend + RS + ATR%) ---
-                            if eligible(df, t, pparams.min_atr_pct):
-                                cands.append(sym)
+                        atr_ok = bool(df.loc[t, "atr_ok"]) if "atr_ok" in df.columns else True
+                        if "atr_ok" in df.columns and not bool(df.loc[t, "atr_ok"]):
+                            continue
+                        trend_ok = bool(df.loc[t, "trend_up"]) if "trend_up" in df.columns else True
+                        if np.isfinite(adv20) and (adv20 >= pparams.adv20_min) and atr_ok and trend_ok:
+                            cands.append(sym)
 
             if cands:
-                # rank cands by composite score
+                # rank by model + RSI + MOM + ADV
                 rows = []
                 for sym in cands:
                     df = price_map[sym]
@@ -480,7 +509,7 @@ def portfolio_backtest_pro(
 
                 scores: Dict[str, float] = {}
                 for sym in tmp.index:
-                    s_model = model_score_map.get(sym, 0.0)
+                    s_model = float(model_score_map.get(sym, 0.0))
                     scores[sym] = float(
                         pparams.w_model * s_model
                         + pparams.w_rsi * float(tmp.loc[sym, "z_rsi"])
@@ -491,65 +520,52 @@ def portfolio_backtest_pro(
                 ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
                 selected = [s for s, _ in ranked[:cap]]
 
-                # diversification slot sizing (cap per position)
                 eq_now = float(equity_rows[-1][1])
-                slot = eq_now / max(1, pparams.max_open)
+                slot = eq_now / max(1, int(pparams.max_open))
+
+                dyn_risk_pct = effective_risk_pct(pparams, week_r)
 
                 for sym in selected:
                     df = price_map[sym]
                     sig = sig_map[sym]
                     _, bp = best_cfg_map[sym]
 
-                    if nxt not in df.index or t not in df.index or t not in sig.index:
+                    if (nxt not in df.index) or (t not in df.index) or (t not in sig.index):
                         continue
 
                     entry_px = float(df.loc[nxt, "Open"]) * (1 + slip)
 
-                    swing_low = float(df["Low"].loc[:t].tail(bp.swing_lookback).min())
-                    stop_swing = swing_low * (1 - bp.swing_buffer)
-                    stop_atr = float(sig.loc[t, "d_ema20"] - (bp.atr_stop_mult * sig.loc[t, "atr14"]))
-                    stop_px = float(stop_atr if bp.use_atr_stop else stop_swing)
+                    swing_low = float(df["Low"].loc[:t].tail(int(bp.swing_lookback)).min())
+                    stop_swing = swing_low * (1 - float(bp.swing_buffer))
+
+                    # ATR stop option
+                    stop_atr = float(sig.loc[t, "d_ema20"] - (float(bp.atr_stop_mult) * float(sig.loc[t, "atr14"])))
+                    stop_px = float(stop_atr if bool(bp.use_atr_stop) else stop_swing)
 
                     R = entry_px - stop_px
-                    if not np.isfinite(R) or R <= 0:
+                    if (not np.isfinite(R)) or (R <= 0):
                         continue
 
-                    # risk-based sizing
-                    # --- Dynamic risk throttling (soft throttle) ---
-                    risk_pct_dyn = float(pparams.risk_pct)
-
-                    # Haftalık loss cluster varsa risk düşür
-                    if week_r <= -2.0:
-                        risk_pct_dyn = min(risk_pct_dyn, 0.015)
-                    if week_r <= -4.0:
-                        risk_pct_dyn = min(risk_pct_dyn, 0.010)
-
-                    # Çok kötüleşirse yeni entry yok (hard kill zaten var ama bu daha erken)
-                    if week_r <= -5.0:
-                        risk_pct_dyn = 0.0
-
-                    if risk_pct_dyn <= 0.0:
-                        continue
-
-                    risk_amt = eq_now * risk_pct_dyn
+                    # risk amount (dynamic)
+                    risk_amt = eq_now * float(dyn_risk_pct)
                     shares_risk = np.floor(risk_amt / R)
 
                     if (not np.isfinite(shares_risk)) or shares_risk < 1:
                         continue
 
-                    # cap by slot
+                    # diversification slot cap
                     shares_slot = np.floor(slot / entry_px)
                     if (not np.isfinite(shares_slot)) or shares_slot < 1:
                         continue
 
-                    # cap by max notional
-                    max_notional = eq_now * pparams.max_notional_pct
+                    # max notional cap
+                    max_notional = eq_now * float(pparams.max_notional_pct)
                     shares_notional = np.floor(max_notional / entry_px)
                     if (not np.isfinite(shares_notional)) or shares_notional < 1:
                         continue
 
-                    # cap by cash affordability
-                    cash_buffer = eq_now * pparams.min_cash_buffer_pct
+                    # cash affordability cap
+                    cash_buffer = eq_now * float(pparams.min_cash_buffer_pct)
                     available_cash = max(0.0, cash - cash_buffer)
                     shares_cash = np.floor(available_cash / (entry_px * (1.0 + fee)))
                     if (not np.isfinite(shares_cash)) or shares_cash < 1:
@@ -565,29 +581,27 @@ def portfolio_backtest_pro(
                     if total_cost > cash:
                         continue
 
+                    trade_id = next_trade_id
+                    next_trade_id += 1
+
                     cash -= total_cost
                     positions[sym] = _Pos(
-                        trade_id=next_trade_id,
+                        trade_id=trade_id,
                         entry_px=entry_px,
                         stop_px=stop_px,
                         R=R,
                         shares=shares,
                         orig_shares=shares,
                     )
-                    next_trade_id += 1
+                    log_trade(nxt, sym, trade_id, "ENTRY", entry_px, shares, 0.0, 0.0)
 
-                    log_trade(nxt, sym, next_trade_id, "ENTRY", entry_px, shares, 0.0)
-
-    # =========================
-    # Outputs
-    # =========================
+    # finalize outputs
     eqdf = pd.DataFrame(equity_rows, columns=["Date", "Equity", "Cash", "Npos"]).set_index("Date")
     trdf = pd.DataFrame(
         trades,
-        columns=["Date", "Ticker", "Type", "Px", "Shares", "Notional", "R_PnL", "R_Leg"],
+        columns=["Date", "Ticker", "TradeID", "Type", "Px", "Shares", "Notional", "R_PnL", "R_Leg"],
     )
 
-    # R summary
     rsum = r_summary(trdf)
     if rsum:
         pd.Series(rsum).to_csv(outdir / "r_summary.csv", header=False)
@@ -602,5 +616,4 @@ def portfolio_backtest_pro(
     trdf.to_csv(outdir / "trades.csv", index=False)
 
     plot_equity(eqdf[["Equity"]], outdir / "equity.png", title="Portfolio Equity")
-
     return {"equity_curve": eqdf, "trades": trdf}
