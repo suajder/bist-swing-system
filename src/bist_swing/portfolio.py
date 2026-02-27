@@ -60,6 +60,13 @@ class PortfolioParams:
     atr_n: int = 14
     min_atr_pct: float = 0.0  # e.g. 0.01 -> 1%
 
+    # volatility filters (ATR% band)
+    min_atr_pct: float = 0.010   # 1.0%
+    max_atr_pct: float = 0.060   # 6.0%
+
+    # re-entry cooldown after STOP (days)
+    stop_cooldown_days: int = 10
+
 
 # ============================================================
 # Utils
@@ -227,7 +234,7 @@ def portfolio_backtest_pro(
             df["ADV20"] = (df["Close"] * df["Volume"]).rolling(20).mean()
         df = add_trend_cols(df, pparams.trend_fast, pparams.trend_slow)
         df = add_atr_cols(df, pparams.atr_n)
-        df["atr_ok"] = df["atr_pct"] >= float(pparams.min_atr_pct)
+        df["atr_ok"] = (df["atr_pct"] >= float(pparams.min_atr_pct)) & (df["atr_pct"] <= float(pparams.max_atr_pct))
         price_map[sym] = df
 
     # build signals per ticker (full history)
@@ -244,6 +251,7 @@ def portfolio_backtest_pro(
     cash = float(pparams.initial_equity)
     positions: Dict[str, _Pos] = {}
     next_trade_id = 1
+    last_stop_date: Dict[str, pd.Timestamp] = {}
 
     # trades: Date, Ticker, TradeID, Type, Px, Shares, Notional, R_PnL, R_Leg
     trades: List[tuple] = []
@@ -324,35 +332,41 @@ def portfolio_backtest_pro(
             l2 = float(df.loc[nxt, "Low"])
 
             # weekly exit -> partial + stop tighten (only once per trade)
+            # weekly exit -> R-based partial (only if >= +1R) + stop tighten
             if bool(sig.loc[t, "w_exit_regime"]) and (not pos.weekly_partial_done):
-                qty = float(pos.shares) * 0.5
-                if qty > 0:
-                    px = o2 * (1 - slip)
-                    proceeds = qty * px * (1 - fee)
-                    cash += proceeds
 
-                    risk_ref = float(pos.orig_shares) * float(pos.R)  # TL risk budget for trade
-                    cash_pnl = (float(px) - float(pos.entry_px)) * float(qty)
-                    r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
-                    r_leg = (float(px) - float(pos.entry_px)) / float(pos.R) if (np.isfinite(pos.R) and pos.R > 0) else 0.0
+                # current R leg at next open
+                current_r_leg = (o2 - pos.entry_px) / pos.R if (np.isfinite(pos.R) and pos.R > 0) else 0.0
 
-                    day_r += r_pnl
-                    week_r += r_pnl
+                # tighten stop regardless
+                ema20 = safe_float(sig.loc[t, "d_ema20"], np.nan)
+                if np.isfinite(ema20):
+                    pos.stop_px = max(float(pos.stop_px), float(ema20))
 
-                    pos.shares -= qty
-                    pos.weekly_partial_done = True  # CRITICAL: prevents repeated weekly partial
+                # only partial if >= +1R
+                if current_r_leg >= 1.0:
 
-                    # tighten stop: max(old_stop, EMA20) if available
-                    ema20 = safe_float(df.loc[t, "EMA20"], np.nan)
-                    if np.isfinite(ema20):
-                        pos.stop_px = max(float(pos.stop_px), float(ema20))
+                    qty = float(pos.shares) * (1.0 / 3.0)
+                    if qty > 0:
 
-                    log_trade(nxt, sym, pos.trade_id, "WeeklyPartial", px, qty, r_pnl, r_leg)
+                        px = o2 * (1 - slip)
+                        proceeds = qty * px * (1 - fee)
+                        cash += proceeds
 
-                if pos.shares <= 1e-12:
-                    positions.pop(sym, None)
-                else:
-                    positions[sym] = pos
+                        risk_ref = float(pos.orig_shares) * float(pos.R)
+                        cash_pnl = (px - pos.entry_px) * qty
+                        r_pnl = (cash_pnl / risk_ref) if (np.isfinite(risk_ref) and risk_ref > 0) else 0.0
+                        r_leg = (px - pos.entry_px) / pos.R if (np.isfinite(pos.R) and pos.R > 0) else 0.0
+
+                        day_r += r_pnl
+                        week_r += r_pnl
+
+                        pos.shares -= qty
+                        pos.weekly_partial_done = True
+
+                        log_trade(nxt, sym, pos.trade_id, "WeeklyPartial", px, qty, r_pnl, r_leg)
+
+                positions[sym] = pos
                 continue
 
             # Unified intrabar resolution (same as live/backtest):
@@ -384,7 +398,7 @@ def portfolio_backtest_pro(
                 day_r += r_pnl
                 week_r += r_pnl
                 log_trade(nxt, sym, pos.trade_id, "Stop", px, qty, r_pnl, r_leg)
-
+                last_stop_date[sym] = pd.Timestamp(nxt)
                 positions.pop(sym, None)
                 continue
 
@@ -462,10 +476,16 @@ def portfolio_backtest_pro(
                     continue
                 df = price_map[sym]
                 sig = sig_map[sym]
+                # cooldown after stop
+                if sym in last_stop_date:
+                    if (pd.Timestamp(t) - last_stop_date[sym]).days < int(pparams.stop_cooldown_days):
+                        continue
                 if (t in sig.index) and bool(sig.loc[t, "entry_signal"]):
                     if t in df.index:
                         adv20 = safe_float(df.loc[t, "ADV20"], np.nan)
                         atr_ok = bool(df.loc[t, "atr_ok"]) if "atr_ok" in df.columns else True
+                        if "atr_ok" in df.columns and not bool(df.loc[t, "atr_ok"]):
+                            continue
                         trend_ok = bool(df.loc[t, "trend_up"]) if "trend_up" in df.columns else True
                         if np.isfinite(adv20) and (adv20 >= pparams.adv20_min) and atr_ok and trend_ok:
                             cands.append(sym)
