@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from operator import eq
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -178,15 +179,63 @@ def r_summary(trdf: pd.DataFrame) -> Dict[str, float]:
         "max_consec_loss_R": max_consec_loss_r,
     }
 
+def effective_risk_pct(
+    pp: PortfolioParams,
+    week_r: float,
+    day_r: float,
+    dd_r: float,
+) -> float:
+    """
+    Dynamic risk throttle.
 
-def effective_risk_pct(pp: PortfolioParams, week_r: float) -> float:
-    """Soft throttling based on current weekly R."""
-    if week_r <= -float(pp.throttle_w2_R):
-        return float(pp.throttle_risk2)
+    Inputs
+    -------
+    week_r : weekly R performance
+    day_r  : daily R performance
+    dd_r   : drawdown expressed in R units (negative)
+
+    Returns
+    -------
+    risk_pct for next trade
+    """
+
+    rp = float(pp.risk_pct)
+
+    # --- weekly throttle ---
     if week_r <= -float(pp.throttle_w1_R):
-        return float(pp.throttle_risk1)
-    return float(pp.risk_pct)
+        rp = min(rp, float(pp.throttle_risk1))
 
+    if week_r <= -float(pp.throttle_w2_R):
+        rp = min(rp, float(pp.throttle_risk2))
+
+    # strong weekly pain -> block entries
+    if week_r <= -float(pp.throttle_block_R):
+        return 0.0
+
+    # --- daily throttle ---
+    if day_r <= -1.5:
+        rp = min(rp, 0.0125)
+
+    if day_r <= -2.5:
+        rp = min(rp, 0.010)
+
+    if day_r <= -3.0:
+        return 0.0
+
+    # --- drawdown throttle ---
+    if dd_r <= -6.0:
+        rp = min(rp, 0.0125)
+
+    if dd_r <= -10.0:
+        rp = min(rp, 0.010)
+
+    if dd_r <= -14.0:
+        rp = min(rp, 0.0075)
+
+    if dd_r <= -18.0:
+        return 0.0
+
+    return float(max(0.0, rp))
 
 # ============================================================
 # Position
@@ -253,6 +302,9 @@ def portfolio_backtest_pro(
     next_trade_id = 1
     last_stop_date: Dict[str, pd.Timestamp] = {}
 
+    # track peak equity for drawdown throttle
+    peak_eq = float(pparams.initial_equity)
+
     # trades: Date, Ticker, TradeID, Type, Px, Shares, Notional, R_PnL, R_Leg
     trades: List[tuple] = []
 
@@ -287,6 +339,50 @@ def portfolio_backtest_pro(
     cur_week = None
     equity_rows: List[tuple] = []
 
+    def risk_throttle_pct(
+        *,
+        base_risk_pct: float,
+        week_r: float,
+        day_r: float,
+        dd_r: float,
+    ) -> float:
+        """
+        Returns an effective risk_pct given current conditions.
+        - week/day R: short-term pain
+        - dd_r: drawdown in R-units (negative number)
+        """
+        rp = float(base_risk_pct)
+
+        # --- Short-term (existing idea, but softer) ---
+        # Week pain => reduce risk
+        if week_r <= -2.0:
+            rp = min(rp, 0.015)
+        if week_r <= -4.0:
+            rp = min(rp, 0.010)
+        if week_r <= -5.0:
+            rp = 0.0  # no new entries
+
+        # Day pain => immediate caution
+        if day_r <= -1.5:
+            rp = min(rp, 0.0125)
+        if day_r <= -2.5:
+            rp = min(rp, 0.010)
+        if day_r <= -3.0:
+            rp = 0.0
+
+        # --- Drawdown-based throttle (NEW) ---
+        # dd_r is negative; e.g. -6R means meaningful pain
+        if dd_r <= -6.0:
+            rp = min(rp, 0.0125)
+        if dd_r <= -10.0:
+            rp = min(rp, 0.010)
+        if dd_r <= -14.0:
+            rp = min(rp, 0.0075)
+        if dd_r <= -18.0:
+            rp = 0.0
+
+        return float(max(0.0, rp))
+
     # costs from first ticker's backtest params
     any_bp = best_cfg_map[tickers[0]][1]
     slip = float(any_bp.slippage_bps) / 10000.0
@@ -314,6 +410,9 @@ def portfolio_backtest_pro(
             if t in df.index:
                 eq += pos.shares * float(df.loc[t, "Close"])
         equity_rows.append((t, eq, cash, len(positions)))
+
+        # update equity peak
+        peak_eq = max(peak_eq, float(eq))
 
         # =========================
         # Exits (executed on nxt bar)
@@ -523,7 +622,15 @@ def portfolio_backtest_pro(
                 eq_now = float(equity_rows[-1][1])
                 slot = eq_now / max(1, int(pparams.max_open))
 
-                dyn_risk_pct = effective_risk_pct(pparams, week_r)
+                # --- drawdown calculation ---
+                dd_cash = eq_now - peak_eq
+                risk_unit = max(1e-9, eq_now * float(pparams.risk_pct))
+                dd_r = dd_cash / risk_unit  # negative
+
+                dyn_risk_pct = effective_risk_pct(pparams, week_r, day_r, dd_r)
+
+                if dyn_risk_pct <= 0:
+                    continue
 
                 for sym in selected:
                     df = price_map[sym]
