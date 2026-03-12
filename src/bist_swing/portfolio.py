@@ -61,6 +61,9 @@ class PortfolioParams:
     atr_n: int = 14
     min_atr_pct: float = 0.0  # e.g. 0.01 -> 1%
 
+    # market regime
+    max_index_vol20: float = 0.03
+
     # volatility filters (ATR% band)
     min_atr_pct: float = 0.010   # 1.0%
     max_atr_pct: float = 0.060   # 6.0%
@@ -185,58 +188,35 @@ def effective_risk_pct(
     day_r: float,
     dd_r: float,
 ) -> float:
-    """
-    Dynamic risk throttle.
-
-    Inputs
-    -------
-    week_r : weekly R performance
-    day_r  : daily R performance
-    dd_r   : drawdown expressed in R units (negative)
-
-    Returns
-    -------
-    risk_pct for next trade
-    """
-
     rp = float(pp.risk_pct)
 
-    # --- weekly throttle ---
-    if week_r <= -float(pp.throttle_w1_R):
-        rp = min(rp, float(pp.throttle_risk1))
-
-    if week_r <= -float(pp.throttle_w2_R):
-        rp = min(rp, float(pp.throttle_risk2))
-
-    # strong weekly pain -> block entries
-    if week_r <= -float(pp.throttle_block_R):
+    # weekly throttle
+    if week_r <= -1.0:
+        rp = min(rp, 0.015)
+    if week_r <= -2.0:
+        rp = min(rp, 0.010)
+    if week_r <= -3.0:
         return 0.0
 
-    # --- daily throttle ---
-    if day_r <= -1.5:
+    # daily throttle
+    if day_r <= -1.0:
         rp = min(rp, 0.0125)
-
+    if day_r <= -2.0:
+        rp = min(rp, 0.010)
     if day_r <= -2.5:
-        rp = min(rp, 0.010)
-
-    if day_r <= -3.0:
         return 0.0
 
-    # --- drawdown throttle ---
-    if dd_r <= -6.0:
-        rp = min(rp, 0.0125)
-
-    if dd_r <= -10.0:
+    # drawdown throttle (more aggressive)
+    if dd_r <= -2.0:
+        rp = min(rp, 0.015)
+    if dd_r <= -4.0:
         rp = min(rp, 0.010)
-
-    if dd_r <= -14.0:
+    if dd_r <= -6.0:
         rp = min(rp, 0.0075)
-
-    if dd_r <= -18.0:
+    if dd_r <= -8.0:
         return 0.0
 
     return float(max(0.0, rp))
-
 # ============================================================
 # Position
 # ============================================================
@@ -288,6 +268,22 @@ def portfolio_backtest_pro(
 
     # build signals per ticker (full history)
     sig_map = {t: se.build(price_map[t], best_cfg_map[t][0]) for t in tickers}
+
+    # =========================
+    # Market regime filter (XU100)
+    # =========================
+    if "XU100.IS" in price_map:
+        idx_df = price_map["XU100.IS"].copy()
+        idx_close = idx_df["Close"].astype(float)
+        idx_ma200 = idx_close.rolling(200).mean()
+
+        # simple realized vol proxy on index
+        idx_ret = idx_close.pct_change()
+        idx_vol20 = idx_ret.rolling(20).std()
+    else:
+        idx_close = None
+        idx_ma200 = None
+        idx_vol20 = None
 
     # common calendar: first ticker
     cal = price_map[tickers[0]].index
@@ -392,6 +388,25 @@ def portfolio_backtest_pro(
         t = cal[i]
         nxt = cal[i + 1]
 
+        # =========================
+        # Market regime state at t
+        # =========================
+        market_trend_ok = True
+        market_vol_ok = True
+
+        if idx_close is not None and t in idx_close.index:
+            ma200_t = safe_float(idx_ma200.loc[t], np.nan)
+            close_t = safe_float(idx_close.loc[t], np.nan)
+
+            # trend filter: only allow new entries when XU100 > MA200
+            if np.isfinite(ma200_t) and np.isfinite(close_t):
+                market_trend_ok = close_t > ma200_t
+
+            # vol filter: block entries if index vol is too high
+            if idx_vol20 is not None:
+                vol20_t = safe_float(idx_vol20.loc[t], np.nan)
+                if np.isfinite(vol20_t):
+                    market_vol_ok = vol20_t <= float(pparams.max_index_vol20)
         d = pd.Timestamp(t).date()
         w = pd.Timestamp(t).isocalendar().week
 
@@ -413,7 +428,7 @@ def portfolio_backtest_pro(
 
         # update equity peak
         peak_eq = max(peak_eq, float(eq))
-
+        
         # =========================
         # Exits (executed on nxt bar)
         # =========================
@@ -567,7 +582,7 @@ def portfolio_backtest_pro(
         soft_block = week_r <= -float(pparams.throttle_block_R)
         cap = int(pparams.max_open) - len(positions)
 
-        if (cap > 0) and (not hard_kill) and (not soft_block):
+        if (cap > 0) and (not hard_kill) and (not soft_block) and market_trend_ok and market_vol_ok:
             # candidate selection
             cands: List[str] = []
             for sym in tickers:
