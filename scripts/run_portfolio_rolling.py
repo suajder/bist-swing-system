@@ -162,6 +162,9 @@ def main():
     tickers = read_universe(UNIVERSE_FILE)
     if not tickers:
         raise SystemExit("Universe is empty.")
+    
+    benchmark_ticker = "XU100.IS"
+    download_list = sorted(set(tickers + [benchmark_ticker]))
 
     OUT_ROOT.mkdir(parents=True, exist_ok=True)
 
@@ -183,7 +186,7 @@ def main():
     # Download prices once, reuse
     price_map: Dict[str, pd.DataFrame] = {}
     failed: List[str] = []
-    for t in tickers:
+    for t in download_list:
         df = download_ohlc(t, start=download_start, end=download_end)
         if df.empty:
             failed.append(t)
@@ -191,7 +194,7 @@ def main():
         df = add_adv20(df)
         price_map[t] = df
 
-    tickers_ok = sorted(price_map.keys())
+    tickers_ok = sorted([t for t in tickers if t in price_map])
     print(f"Downloaded OK: {len(tickers_ok)}/{len(tickers)}")
     if failed:
         (OUT_ROOT / "failed_tickers_download.txt").write_text("\n".join(failed) + "\n", encoding="utf-8")
