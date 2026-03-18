@@ -73,16 +73,19 @@ def main():
     tickers = read_universe(UNIVERSE_FILE)
     if not tickers:
         raise SystemExit("Universe is empty.")
+    
+    benchmark_ticker = "XU100.IS"
+    download_list = sorted(set(tickers + [benchmark_ticker]))
 
     # backtest window
     dl_start = "2022-01-01"
     dl_end = None
 
-    print(f"Downloading {len(tickers)} tickers...")
+    print(f"Downloading {len(download_list)} tickers...")
     price_map: Dict[str, pd.DataFrame] = {}
     failed: List[str] = []
 
-    for t in tickers:
+    for t in download_list:
         try:
             df = download_ohlc(t, start=dl_start, end=dl_end)
         except Exception:
@@ -93,7 +96,7 @@ def main():
         df = add_adv20(df)
         price_map[t] = df
 
-    tickers_ok = sorted(price_map.keys())
+    tickers_ok = sorted([t for t in tickers if t in price_map])
     print(f"Downloaded OK: {len(tickers_ok)}/{len(tickers)}")
 
     if failed:
