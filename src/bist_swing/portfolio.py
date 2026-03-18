@@ -7,11 +7,13 @@ from typing import Dict, List, Optional, Tuple
 import numpy as np
 import pandas as pd
 
+from bist_swing.liquidity_shock import add_liquidity_shock_cols
+
 from .backtest import BacktestParams
 from .live_events import resolve_intrabar_exit
 from .reporting import plot_equity
+from bist_swing.institutional_momentum import add_institutional_momentum_cols
 from .signals import SignalEngine, SignalParams
-
 
 # ============================================================
 # Params
@@ -68,8 +70,9 @@ class PortfolioParams:
     # market regime
     max_index_vol20: float = 0.03
 
-    # filter switches
+    # filter switches 
     use_market_regime: bool = True
+    use_liquidity_shock = True
     use_rs_filter: bool = False
     use_trend_strength_filter: bool = False
     use_price_gap_filter: bool = False
@@ -87,12 +90,31 @@ class PortfolioParams:
 
     use_vol_contraction_filter: bool = True
     vol_contract_lookback: int = 10
-    max_atr_ratio: float = 0.85
+    max_atr_ratio: float = 0.85 
 
-   
+    capital_filter_lookback = 50
+    max_loss_streak = 5.0
+    max_dd_limit_R = 20.0
 
-    
+    use_institutional_momentum = True
+    min_inst_mom_score = 0.0
 
+    # =========================
+    # CAPITAL CURVE FILTER
+    # =========================
+    capital_filter_lookback: int = 20
+
+    # =========================
+    # LOSS STREAK THROTTLE
+    # =========================
+    max_loss_streak: int = 3
+
+    # =========================
+    # ADAPTIVE DD GUARD
+    # =========================
+    max_dd_limit_R: float = 3.0
+
+    w_inst = 0.25
 
 # ============================================================
 # Utils
@@ -259,7 +281,6 @@ def effective_risk_pct(
 
     return float(max(0.0, rp))
 
-
 # ============================================================
 # Position
 # ============================================================
@@ -275,7 +296,6 @@ class _Pos:
     tp1: bool = False
     tp2: bool = False
     weekly_partial_done: bool = False
-
 
 # ============================================================
 # Portfolio Backtest
@@ -312,7 +332,9 @@ def portfolio_backtest_pro(
         df = add_trend_cols(df, pparams.trend_fast, pparams.trend_slow)
         df = add_atr_cols(df, pparams.atr_n)
         df = add_vol_contraction_cols(df, pparams.vol_contract_lookback)
+        df = add_institutional_momentum_cols(df)
         df["atr_ok"] = (df["atr_pct"] >= float(pparams.min_atr_pct)) & (df["atr_pct"] <= float(pparams.max_atr_pct))
+        df = add_liquidity_shock_cols(df)
 
         if bench_close is not None and sym != "XU100.IS":
             df = add_rs_filter_cols(df, bench_close, pparams.rs_lookback)
@@ -577,11 +599,60 @@ def portfolio_backtest_pro(
         soft_block = week_r <= -float(pparams.throttle_block_R)
         cap = int(pparams.max_open) - len(positions)
 
+        # =========================
+        # REGİME FILTER
+        # =========================
+
         regime_ok = True
         if bool(pparams.use_market_regime):
                 regime_ok = market_trend_ok and market_vol_ok
 
-        if (cap > 0) and (not hard_kill) and (not soft_block) and regime_ok:
+        # =========================
+        # CAPITAL CURVE FILTER
+        # =========================
+
+        capital_ok = True
+        if len(equity_rows) > int(pparams.capital_filter_lookback):
+            eq_series = pd.Series([x[1] for x in equity_rows])
+            ma = eq_series.rolling(int(pparams.capital_filter_lookback)).mean()
+
+            if np.isfinite(ma.iloc[-1]):
+                capital_ok = eq_series.iloc[-1] >= ma.iloc[-1]
+
+        # =========================
+        # LOSS STREAK THROTTLE
+        # =========================
+
+        loss_streak = 0
+        for tr in reversed(trades):
+            if tr[3] == "Stop":
+                loss_streak += 1
+            else:
+                break
+
+        streak_ok = loss_streak < int(pparams.max_loss_streak)
+
+        # =========================
+        # ADAPTIVE DD GUARD
+        # =========================
+
+        dd_cash = eq - peak_eq
+        risk_unit = max(1e-9, eq * float(pparams.risk_pct))
+        dd_r = dd_cash / risk_unit
+
+        dd_guard_ok = True
+        if dd_r <= -float(pparams.max_dd_limit_R):
+            dd_guard_ok = False
+
+        if (
+            (cap > 0)
+            and (not hard_kill)
+            and (not soft_block)
+            and regime_ok
+            and capital_ok
+            and streak_ok
+            and dd_guard_ok
+        ):
             cands: List[str] = []
             for sym in tickers:
                 if sym in positions:
@@ -607,6 +678,10 @@ def portfolio_backtest_pro(
                         # basic trend filter
                         trend_ok = bool(df.loc[t, "trend_up"]) if "trend_up" in df.columns else True
 
+                        inst_mom_ok = True
+                        if bool(pparams.use_institutional_momentum):
+                            inst_mom_ok = bool(df.loc[t, "inst_mom_ok"])
+
                         # trend-strength filter (optional)
                         trend_spread = safe_float(df.loc[t, "trend_spread_pct"], np.nan)
                         trend_strength_ok = True
@@ -621,6 +696,10 @@ def portfolio_backtest_pro(
 
                         # price + gap sanity filter (optional)
                         close_t = safe_float(df.loc[t, "Close"], np.nan)
+
+                        liq_ok = True
+                        if pparams.use_liquidity_shock and "liq_shock" in df.columns:
+                            liq_ok = bool(df.loc[t, "liq_shock"])
 
                         price_ok = True
                         gap_ok = True
@@ -650,35 +729,42 @@ def portfolio_backtest_pro(
                             and price_ok
                             and gap_ok
                             and vol_contract_ok
+                            and inst_mom_ok
+                            and liq_ok
                         ):
                             cands.append(sym)
 
             if cands:
                 rows = []
                 for sym in cands:
-                    df = price_map[sym]
+                    df_sym = price_map[sym]
                     sig = sig_map[sym]
                     adv20 = safe_float(df.loc[t, "ADV20"], np.nan)
                     rsi14 = safe_float(sig.loc[t, "d_rsi14"], np.nan)
                     mom20 = safe_float(sig.loc[t, "mom20"], np.nan)
-                    rows.append((sym, adv20, rsi14, mom20))
+                    rows.append((sym, adv20, rsi14, mom20, inst))
 
-                tmp = pd.DataFrame(rows, columns=["ticker", "adv20", "rsi", "mom"]).set_index("ticker")
+                tmp = pd.DataFrame(rows, columns=["ticker", "adv20", "rsi", "mom", "inst"]).set_index("ticker")
                 tmp["log_adv"] = np.log(tmp["adv20"].clip(lower=1.0))
                 tmp["z_rsi"] = zscore(tmp["rsi"])
                 tmp["z_mom"] = zscore(tmp["mom"])
                 tmp["z_adv"] = zscore(tmp["log_adv"])
 
                 scores: Dict[str, float] = {}
+
                 for sym in tmp.index:
                     s_model = float(model_score_map.get(sym, 0.0))
+                    inst = safe_float(df.loc[t, "inst_mom_score"], 0.0)
+                    inst = float(tmp.loc[sym, "inst"])   
+
                     scores[sym] = float(
                         pparams.w_model * s_model
                         + pparams.w_rsi * float(tmp.loc[sym, "z_rsi"])
                         + pparams.w_mom * float(tmp.loc[sym, "z_mom"])
                         + pparams.w_adv * float(tmp.loc[sym, "z_adv"])
+                        + pparams.w_inst * inst
                     )
-
+                    
                 ranked = sorted(scores.items(), key=lambda kv: kv[1], reverse=True)
                 selected = [s for s, _ in ranked[:cap]]
 
