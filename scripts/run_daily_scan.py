@@ -90,15 +90,11 @@ def run():
 
     if out.empty:
         print("\nNo signals today.")
-        return
 
-    out = out.sort_values("risk")
-
+    out = pd.DataFrame(columns=["date", "ticker", "entry", "stop", "risk"])
     out.to_csv(OUT / "live_signals.csv", index=False)
 
-    print("\n=== LIVE SIGNALS ===")
-    print(out.head(10))
-
+    return
 
 if __name__ == "__main__":
     run()
