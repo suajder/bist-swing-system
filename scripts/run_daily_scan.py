@@ -6,9 +6,10 @@ sys.path.append(str(Path(__file__).resolve().parents[1]))
 import pandas as pd
 
 from bist_swing.data import get_price_data
-from bist_swing.signals import SignalEngine
+from bist_swing.signals import SignalEngine, SignalParams
 from bist_swing.utils import safe_float
-from bist_swing.signals import SignalParams
+from bist_swing.telegram_notifier import TelegramNotifier
+
 
 OUT = Path("out/live")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -34,8 +35,10 @@ def run():
             continue
 
         df = price_map[sym]
+        print(f"\n{sym} columns:")
+        print(df.columns)
 
-        if df.empty:
+        if df.empty or len(df) < 50:
             continue
 
         sig = se.build(df, sp)
@@ -51,8 +54,10 @@ def run():
         if not bool(sig.loc[t, "entry_signal"]):
             continue
 
+        # =========================
+        # CORE FILTERS
+        # =========================
         adv20 = safe_float(df.loc[t, "ADV20"], 0)
-
         if adv20 < 10_000_000:
             continue
 
@@ -62,11 +67,10 @@ def run():
         if not (inst_ok and liq_ok):
             continue
 
-        entry = float(df.loc[t, "Close"])
-
         if "atr14" not in df.columns:
             continue
 
+        entry = float(df.loc[t, "Close"])
         atr = float(df.loc[t, "atr14"])
 
         if atr <= 0:
@@ -78,23 +82,87 @@ def run():
         if risk <= 0:
             continue
 
+        # =========================
+        # 🔥 SCORE SYSTEM (SIMPLIFIED)
+        # =========================
+        score = 0
+
+        trend_ok = df.loc[t, "trend_ok"]
+        breakout_ok = df.loc[t, "breakout_ok"]
+        vol_ok = df.loc[t, "vol_spike"]
+
+        if trend_ok:
+            score += 1
+
+        if breakout_ok:
+            score += 1
+
+        if vol_ok:
+            score += 1
+
+        # INST MOMENTUM
+        if "inst_mom_score" in df.columns:
+            if df.loc[t, "inst_mom_score"] > 0:
+                score += 1
+
+        # LIQUIDITY BONUS
+        if df.loc[t, "ADV20"] > 20_000_000:
+            score += 1
+        
+        print(f"{sym} → SCORE: {score}")
+
+        # MIN SCORE FILTER
+        if score < 3:
+            continue
+
         signals.append({
             "date": t,
             "ticker": sym,
             "entry": entry,
             "stop": stop,
             "risk": risk,
+            "score": score,
         })
 
     out = pd.DataFrame(signals)
 
     if out.empty:
         print("\nNo signals today.")
+        out.to_csv(OUT / "live_signals.csv", index=False)
+        return
 
-    out = pd.DataFrame(columns=["date", "ticker", "entry", "stop", "risk"])
+    # =========================
+    # 🔥 TOP SELECTION
+    # =========================
+    out = out.sort_values("score", ascending=False).head(5)
+
     out.to_csv(OUT / "live_signals.csv", index=False)
 
-    return
+    print("\n=== LIVE SIGNALS ===")
+    print(out)
 
+# TELEGRAM GÖNDERİMİ
+    try:
+        tg = TelegramNotifier()
+
+        if out.empty:
+            tg.send("📭 Bugün sinyal yok.")
+            return
+
+        msg = "🚀 LIVE SIGNALS\n\n"
+
+        for _, row in out.iterrows():
+            msg += (
+                f"{row['ticker']}\n"
+                f"Entry: {row['entry']:.2f}\n"
+                f"Stop: {row['stop']:.2f}\n"
+                f"Risk: {row['risk']:.2f}\n\n"
+            )
+
+        tg.send(msg)
+
+    except Exception as e:
+        print("Telegram error:", e)
+        
 if __name__ == "__main__":
     run()

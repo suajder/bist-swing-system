@@ -21,3 +21,13 @@ backtest_params:
   swing_buffer: 0.01
   tp1_R: 2.0
   tp2_R: 3.0
+
+capital: 100000
+
+max_portfolio_risk_pct: 0.05   # %5
+max_dd_limit: -0.10            # %10 DD stop
+
+risk_per_trade: 0.01
+
+kill_switch_dd: -0.20
+kill_switch_floating_dd: -0.10
