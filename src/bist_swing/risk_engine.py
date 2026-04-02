@@ -183,7 +183,7 @@ def compute_unrealized_pnl(positions: dict, price_map: dict, asof) -> float:
 
             pnl += (current_px - entry) * qty
 
-        except:
+        except Exception:
             continue
 
     return pnl

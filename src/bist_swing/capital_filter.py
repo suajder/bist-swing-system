@@ -1,4 +1,3 @@
-import pandas as pd
 
 
 def capital_filter(equity_series, lookback=50):

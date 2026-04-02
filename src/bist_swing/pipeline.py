@@ -37,7 +37,7 @@ def run_universe_scan(
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     outdir.mkdir(parents=True, exist_ok=True)
 
-    train_end_dt = pd.to_datetime(train_end)
+
     results = []
     best_cfg_map: Dict[str, Tuple[SignalParams, BacktestParams]] = {}
     model_score_map: Dict[str, float] = {}

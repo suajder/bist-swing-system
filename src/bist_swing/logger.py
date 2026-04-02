@@ -1,7 +1,31 @@
 import csv
+import logging
 from pathlib import Path
+
 import pandas as pd
 
+def setup_logger(name: str = "bist_swing") -> logging.Logger:
+    logger = logging.getLogger(name)
+    if not logger.handlers:
+        logger.setLevel(logging.INFO)
+        fmt = logging.Formatter(
+            "%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S"
+        )
+        
+        # Console handler
+        ch = logging.StreamHandler()
+        ch.setFormatter(fmt)
+        logger.addHandler(ch)
+        
+        # File handler
+        log_dir = Path("logs")
+        log_dir.mkdir(exist_ok=True)
+        fh = logging.FileHandler(log_dir / "system.log")
+        fh.setFormatter(fmt)
+        logger.addHandler(fh)
+        
+    return logger
 # ================================
 # PATHS
 # ================================

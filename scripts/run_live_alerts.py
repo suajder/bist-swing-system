@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -16,7 +15,9 @@ from bist_swing.state_store import StateStore
 
 from bist_swing.position_state import Position
 from bist_swing.live_events import compute_entry_levels, evaluate_position_events
-from bist_swing.logger import log_trade, log_equity
+from bist_swing.logger import log_trade, log_equity, setup_logger
+
+logger = setup_logger("run_live_alerts")
 
 from bist_swing.risk_engine import (
     load_risk_state,
@@ -46,7 +47,7 @@ def safe_send(notifier, text):
     try:
         notifier.send(text)
     except Exception as e:
-        print(e)
+        logger.error(str(e))
 
 
 def pick_safe_asof(df: pd.DataFrame):
@@ -59,7 +60,7 @@ def market_filter(df: pd.DataFrame, asof):
         ema50 = df["Close"].ewm(span=50).mean().loc[asof]
         ema200 = df["Close"].ewm(span=200).mean().loc[asof]
         return close > ema50 > ema200
-    except:
+    except Exception:
         return True
 
 
@@ -97,13 +98,13 @@ def main():
     provider = DataProvider()
     se = SignalEngine()
 
-    universe = [l.strip() for l in Path(args.universe).read_text().splitlines() if l.strip()]
+    universe = [line.strip() for line in Path(args.universe).read_text().splitlines() if line.strip()]
 
     price_map = {}
     for t in universe:
         try:
             price_map[t] = provider.get(t)
-        except:
+        except Exception:
             continue
 
     if not price_map:
@@ -188,7 +189,7 @@ def main():
             state["positions"][sym] = pos.to_dict()
 
         except Exception as e:
-            print(f"[EXIT ERROR] {sym}: {e}")
+            logger.error(f"[EXIT ERROR] {sym}: {e}")
 
     # SCAN
     candidates = []
@@ -208,7 +209,7 @@ def main():
             score = float(sig.loc[asof, "mom20"])
             candidates.append((t, score, entry_px, stop_px, r, sig))
 
-        except:
+        except Exception:
             continue
 
     candidates.sort(key=lambda x: x[1], reverse=True)
@@ -216,8 +217,6 @@ def main():
     # ================================
     # EXIT ENGINE (CRITICAL)
     # ================================
-
-    closed_positions = []
 
     for ticker, p_dict in state["positions"].items():
 
@@ -319,13 +318,15 @@ def main():
             "qty": qty,
         })
 
+        _realized_dd = compute_drawdown(risk_state)
+        _risk_pct = total_risk / capital if capital else 0
         log_equity(
             date=str(asof.date()),
             equity=total_equity,
-            realized_dd=realized_dd,
+            realized_dd=_realized_dd,
             floating_dd=floating_dd,
             open_positions=open_positions,
-            risk_pct=risk_pct
+            risk_pct=_risk_pct
         )
 
         total_risk += r * qty
@@ -349,11 +350,11 @@ def main():
     risk_pct = total_risk / capital if capital else 0
 
     if risk_pct < 0.03:
-        status = "🟢 NORMAL"
+        pass
     elif risk_pct < max_risk_pct:
-        status = "🟡 DİKKAT"
+        pass
     else:
-        status = "🔴 RİSK YÜKSEK"
+        pass
 
     msg = (
         f"📊 EOD RAPOR\n"
