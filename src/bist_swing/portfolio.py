@@ -12,8 +12,12 @@ from bist_swing.liquidity_shock import add_liquidity_shock_cols
 from .backtest import BacktestParams
 from .live_events import resolve_intrabar_exit
 from .reporting import plot_equity
+from .logger import setup_logger
+
+logger = setup_logger("portfolio")
 from bist_swing.institutional_momentum import add_institutional_momentum_cols
 from .signals import SignalEngine, SignalParams
+from .indicators import zscore, ema, atr
 
 # ============================================================
 # Params
@@ -127,33 +131,22 @@ def safe_float(x, default=np.nan) -> float:
         return default
 
 
-def zscore(x: pd.Series) -> pd.Series:
-    mu = x.mean()
-    sd = x.std(ddof=0)
-    if (not np.isfinite(sd)) or sd == 0:
-        return x * 0.0
-    return (x - mu) / sd
+# zscore removed from here, imported from indicators
 
 
 def add_trend_cols(df: pd.DataFrame, fast: int, slow: int) -> pd.DataFrame:
     out = df.copy()
-    out["ema_fast"] = out["Close"].ewm(span=int(fast), adjust=False).mean()
-    out["ema_slow"] = out["Close"].ewm(span=int(slow), adjust=False).mean()
+    out["ema_fast"] = ema(out["Close"], int(fast))
+    out["ema_slow"] = ema(out["Close"], int(slow))
     out["trend_up"] = out["ema_fast"] > out["ema_slow"]
     out["trend_spread_pct"] = out["ema_fast"] / out["ema_slow"] - 1.0
-    out["EMA20"] = out["Close"].ewm(span=20, adjust=False).mean()
+    out["EMA20"] = ema(out["Close"], 20)
     return out
 
 
 def add_atr_cols(df: pd.DataFrame, n: int) -> pd.DataFrame:
     out = df.copy()
-    h = out["High"]
-    l = out["Low"]
-    c = out["Close"]
-    prev_c = c.shift(1)
-
-    tr = pd.concat([(h - l), (h - prev_c).abs(), (l - prev_c).abs()], axis=1).max(axis=1)
-    out["ATR"] = tr.rolling(int(n)).mean()
+    out["ATR"] = atr(out, int(n))
     out["atr_pct"] = out["ATR"] / out["Close"]
     return out
 
@@ -739,10 +732,11 @@ def portfolio_backtest_pro(
                 for sym in cands:
                     df_sym = price_map[sym]
                     sig = sig_map[sym]
-                    adv20 = safe_float(df.loc[t, "ADV20"], np.nan)
+                    adv20 = safe_float(df_sym.loc[t, "ADV20"], np.nan)
                     rsi14 = safe_float(sig.loc[t, "d_rsi14"], np.nan)
                     mom20 = safe_float(sig.loc[t, "mom20"], np.nan)
-                    rows.append((sym, adv20, rsi14, mom20, inst))
+                    inst_val = safe_float(df_sym.loc[t, "inst_mom_score"], 0.0) if "inst_mom_score" in df_sym.columns else 0.0
+                    rows.append((sym, adv20, rsi14, mom20, inst_val))
 
                 tmp = pd.DataFrame(rows, columns=["ticker", "adv20", "rsi", "mom", "inst"]).set_index("ticker")
                 tmp["log_adv"] = np.log(tmp["adv20"].clip(lower=1.0))
@@ -754,7 +748,6 @@ def portfolio_backtest_pro(
 
                 for sym in tmp.index:
                     s_model = float(model_score_map.get(sym, 0.0))
-                    inst = safe_float(df.loc[t, "inst_mom_score"], 0.0)
                     inst = float(tmp.loc[sym, "inst"])   
 
                     scores[sym] = float(
@@ -853,12 +846,12 @@ def portfolio_backtest_pro(
     rsum = r_summary(trdf)
     if rsum:
         pd.Series(rsum).to_csv(outdir / "r_summary.csv", header=False)
-        print("\n=== R SUMMARY (exits) ===")
+        logger.info("\n=== R SUMMARY (exits) ===")
         for k, v in rsum.items():
             if "rate" in k:
-                print(f"{k:18s}: {v*100:6.2f}%")
+                logger.info(f"{k:18s}: {v*100:6.2f}%")
             else:
-                print(f"{k:18s}: {v: .4f}")
+                logger.info(f"{k:18s}: {v: .4f}")
 
     eqdf.to_csv(outdir / "equity_curve.csv")
     trdf.to_csv(outdir / "trades.csv", index=False)

@@ -1,5 +1,4 @@
 import pandas as pd
-import numpy as np
 from pathlib import Path
 import matplotlib.pyplot as plt
 
@@ -78,7 +77,7 @@ def run():
 
             try:
                 entry_idx = df.index.get_loc(t)
-            except:
+            except Exception:
                 continue
 
             R = entry - stop

@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dotenv import load_dotenv
-load_dotenv()
-
 import os
 import requests
+from dotenv import load_dotenv
+
+load_dotenv()
 
 class TelegramNotifier:
     def __init__(self, token: str | None = None, chat_id: str | None = None, timeout: int = 15):

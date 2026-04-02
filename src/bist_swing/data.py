@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-import time
 from typing import Optional, Dict, List
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 import pandas as pd
 import numpy as np
 import requests
+
+from bist_swing.logger import setup_logger
+logger = setup_logger("data")
 
 
 class DataProvider:
@@ -98,38 +101,30 @@ class DataProvider:
         df = df.dropna()
         df = df.sort_index()
 
-        time.sleep(0.2)
+        # time.sleep(0.2) removed for parallelization
 
         return df
-
-
-def load_price_data(tickers: List[str]) -> Dict[str, pd.DataFrame]:
-    dp = DataProvider()
-    price_map = {}
-
-    print(f"\nDownloading {len(tickers)} tickers...")
-
-    for sym in tickers:
-        try:
-            df = dp.get(sym)
-            price_map[sym] = df
-        except Exception as e:
-            print(f"[ERROR] {sym}: {e}")
-
-    print(f"Downloaded OK: {len(price_map)}/{len(tickers)}")
-
-    return price_map
 
 
 def get_price_data(tickers: List[str]) -> Dict[str, pd.DataFrame]:
     provider = DataProvider()
     price_map = {}
 
-    for t in tickers:
+    def fetch(t):
         try:
-            df = provider.get(t)
-            price_map[t] = df
+            return t, provider.get(t)
         except Exception as e:
-            print(f"[WARN] {t} failed: {e}")
+            logger.warning(f"[{t}] failed: {e}")
+            return t, None
+
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        futures = {executor.submit(fetch, t): t for t in tickers}
+        for future in as_completed(futures):
+            t, df = future.result()
+            if df is not None:
+                price_map[t] = df
 
     return price_map
+
+def load_price_data(tickers: List[str]) -> Dict[str, pd.DataFrame]:
+    return get_price_data(tickers)

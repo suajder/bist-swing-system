@@ -4,12 +4,15 @@ from pathlib import Path
 sys.path.append(str(Path(__file__).resolve().parents[1]))
 
 import pandas as pd
+import yaml
 
 from bist_swing.data import get_price_data
 from bist_swing.signals import SignalEngine, SignalParams
 from bist_swing.utils import safe_float
 from bist_swing.telegram_notifier import TelegramNotifier
+from bist_swing.logger import setup_logger
 
+logger = setup_logger("run_daily_scan")
 
 OUT = Path("out/live")
 OUT.mkdir(parents=True, exist_ok=True)
@@ -17,10 +20,16 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 def run():
 
+    with open("configs/live.yaml", "r") as f:
+        config = yaml.safe_load(f)
+        
+    adv20_limit = config.get("adv20_min", 10_000_000)
+    top_k = config.get("top_k", 5)
+
     with open("configs/universe.txt", "r") as f:
         tickers = [line.strip() for line in f if line.strip()]
 
-    print(f"\nDownloading {len(tickers)} tickers...")
+    logger.info(f"Downloading {len(tickers)} tickers...")
 
     price_map = get_price_data(tickers)
 
@@ -35,8 +44,7 @@ def run():
             continue
 
         df = price_map[sym]
-        print(f"\n{sym} columns:")
-        print(df.columns)
+        logger.debug(f"{sym} columns: {df.columns}")
 
         if df.empty or len(df) < 50:
             continue
@@ -58,7 +66,7 @@ def run():
         # CORE FILTERS
         # =========================
         adv20 = safe_float(df.loc[t, "ADV20"], 0)
-        if adv20 < 10_000_000:
+        if adv20 < adv20_limit:
             continue
 
         inst_ok = bool(df.loc[t, "inst_mom_ok"]) if "inst_mom_ok" in df.columns else True
@@ -109,7 +117,7 @@ def run():
         if df.loc[t, "ADV20"] > 20_000_000:
             score += 1
         
-        print(f"{sym} → SCORE: {score}")
+        logger.info(f"{sym} → SCORE: {score}")
 
         # MIN SCORE FILTER
         if score < 3:
@@ -127,19 +135,19 @@ def run():
     out = pd.DataFrame(signals)
 
     if out.empty:
-        print("\nNo signals today.")
+        logger.info("No signals today.")
         out.to_csv(OUT / "live_signals.csv", index=False)
         return
 
     # =========================
     # 🔥 TOP SELECTION
     # =========================
-    out = out.sort_values("score", ascending=False).head(5)
+    out = out.sort_values("score", ascending=False).head(top_k)
 
     out.to_csv(OUT / "live_signals.csv", index=False)
 
-    print("\n=== LIVE SIGNALS ===")
-    print(out)
+    logger.info("=== LIVE SIGNALS ===")
+    logger.info(f"\n{out}")
 
 # TELEGRAM GÖNDERİMİ
     try:
@@ -162,7 +170,7 @@ def run():
         tg.send(msg)
 
     except Exception as e:
-        print("Telegram error:", e)
+        logger.error(f"Telegram error: {e}")
         
 if __name__ == "__main__":
     run()

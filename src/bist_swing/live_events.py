@@ -3,7 +3,6 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List
 
-import numpy as np
 import pandas as pd
 
 from typing import TYPE_CHECKING
@@ -59,8 +58,8 @@ def compute_entry_and_stop(
 
 # ---------------- CORE LOGIC ----------------
 
-def _hit(h, l, level):
-    return l <= level <= h
+def _hit(high_px, low_px, level):
+    return low_px <= level <= high_px
 
 
 def _dist(o, level):
@@ -163,7 +162,7 @@ def evaluate_position_events(
 
     # ---------------- TP1 ----------------
     if evt == "TP1":
-        qty_closed = pos.qty * 0.5   # partial exit
+        qty_closed = min(pos.orig_shares / 3.0, pos.qty)   # matching backtest logic
         pnl = (lvl - pos.entry_px) * qty_closed
         update_equity(risk_state, pnl)   # 🔥
 

@@ -51,32 +51,35 @@ for r in reversed(exits["R_PnL"].tolist()):
         break
 
 
-print("\n==============================")
-print("CANLI RİSK MONİTÖRÜ")
-print("==============================\n")
+from bist_swing.logger import setup_logger
+logger = setup_logger("risk_monitor")
 
-print(f"Bugün R sonucu      : {today_R:.2f}")
-print(f"Bu hafta R sonucu   : {this_week_R:.2f}")
-print(f"Aktif Drawdown      : {current_dd:.2f}")
-print(f"Max Drawdown        : {max_dd:.2f}")
-print(f"Kayıp Serisi        : {loss_streak}")
+logger.info("\n==============================")
+logger.info("CANLI RİSK MONİTÖRÜ")
+logger.info("==============================\n")
 
-print("\nRİSK DURUMU")
-print("-------------------------")
+logger.info(f"Bugün R sonucu      : {today_R:.2f}")
+logger.info(f"Bu hafta R sonucu   : {this_week_R:.2f}")
+logger.info(f"Aktif Drawdown      : {current_dd:.2f}")
+logger.info(f"Max Drawdown        : {max_dd:.2f}")
+logger.info(f"Kayıp Serisi        : {loss_streak}")
+
+logger.info("\nRİSK DURUMU")
+logger.info("-------------------------")
 
 if today_R <= -3:
-    print("⚠ Günlük risk limiti aşıldı → BUGÜN TRADE YOK")
+    logger.warning("Günlük risk limiti aşıldı → BUGÜN TRADE YOK")
 
 elif this_week_R <= -6:
-    print("⚠ Haftalık risk limiti aşıldı → HAFTA SONUNA KADAR TRADE YOK")
+    logger.warning("Haftalık risk limiti aşıldı → HAFTA SONUNA KADAR TRADE YOK")
 
 elif current_dd <= -15:
-    print("⚠ Drawdown yüksek → RİSK %50 DÜŞÜR")
+    logger.warning("Drawdown yüksek → RİSK %50 DÜŞÜR")
 
 elif loss_streak >= 5:
-    print("⚠ Kayıp serisi → POZİSYON SAYISINI AZALT")
+    logger.warning("Kayıp serisi → POZİSYON SAYISINI AZALT")
 
 else:
-    print("✓ Risk normal → TRADE OK")
+    logger.info("✓ Risk normal → TRADE OK")
 
-print("\n==============================")
+logger.info("\n==============================")

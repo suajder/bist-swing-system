@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from dataclasses import replace
 from itertools import product
-from typing import Dict, Iterable, List, Tuple
+from typing import Dict, List, Tuple
 
 from .backtest import BacktestParams
 from .signals import SignalParams

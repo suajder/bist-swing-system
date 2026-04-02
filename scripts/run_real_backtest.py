@@ -19,7 +19,7 @@ def simulate_trade(df, entry_idx, entry_price, stop, target):
         high = df.iloc[i]["High"]
         low = df.iloc[i]["Low"]
 
-        if low <= sinset-block-start:
+        if low <= stop:
             return -1
 
         if high >= target:
