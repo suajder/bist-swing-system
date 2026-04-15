@@ -80,6 +80,6 @@ elif loss_streak >= 5:
     logger.warning("Kayıp serisi → POZİSYON SAYISINI AZALT")
 
 else:
-    logger.info("✓ Risk normal → TRADE OK")
+    logger.info("[OK] Risk normal -> TRADE OK")
 
 logger.info("\n==============================")

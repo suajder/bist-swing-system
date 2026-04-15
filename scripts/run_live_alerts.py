@@ -14,7 +14,7 @@ from bist_swing.telegram_notifier import TelegramNotifier
 from bist_swing.state_store import StateStore
 
 from bist_swing.position_state import Position
-from bist_swing.live_events import compute_entry_levels, evaluate_position_events
+from bist_swing.live_events import compute_entry_and_stop, evaluate_position_events
 from bist_swing.logger import log_trade, log_equity, setup_logger
 
 logger = setup_logger("run_live_alerts")
@@ -201,7 +201,7 @@ def main():
             if not bool(sig.loc[asof, "entry_signal"]):
                 continue
 
-            entry_px, stop_px, r, nxt = compute_entry_levels(df, sig, asof, bp)
+            entry_px, stop_px, r, nxt = compute_entry_and_stop(sig, asof, bp)
 
             if (r / entry_px) > 0.05:
                 continue
