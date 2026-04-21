@@ -208,11 +208,17 @@ def render_live_portfolio():
                         # Hesaplamalar (görsel bilgi için)
                         risk_amount = pm.state.capital * (pm.state.risk_pct / 100.0)
                         rps = entry - stop
-                        qty = max(1, int(risk_amount / rps)) if rps > 0 else 0
-                        notional = qty * entry
+                        suggested_qty = max(1, int(risk_amount / rps)) if rps > 0 else 0
+                        
+                        # Kullanıcının manuel müdahale edebileceği lot input'u (streamlit widget olduğu için değer değiştikçe sayfa yenilenir ve güncel değer custom_qty'ye atanır)
+                        custom_qty = st.number_input(f"Alınacak Lot (Önerilen: {suggested_qty})", min_value=1, value=suggested_qty, step=1, key=f"qty_{ticker}")
+                        
+                        # Seçilen lot sayısına göre dinamik hesaplanan değerler
+                        custom_notional = custom_qty * entry
+                        custom_risk = custom_qty * rps
                         
                         st.markdown(f"**{ticker}** | Giriş: `{entry:.2f}` | Stop: `{stop:.2f}` | Risk/Hisse: `{rps:.2f}`")
-                        st.caption(f"Önerilen: **{qty} Lot** ({notional:,.2f} TL) | Riske Edilecek Tutar: **{risk_amount:,.2f} TL**")
+                        st.caption(f"İşlem Büyüklüğü: **{custom_notional:,.2f} TL** | Riske Edilen Tutar: **{custom_risk:,.2f} TL**")
                     
                     with colB:
                         if already:
@@ -220,9 +226,10 @@ def render_live_portfolio():
                         elif open_slots <= 0:
                             st.button("Kapasite Dolu", disabled=True, key=f"ds_{ticker}")
                         else:
-                            if st.button("➕ Portföye Ekle", key=f"add_{ticker}"):
+                            st.write("") # Dikey hizalama için boşluk
+                            if st.button("➕ Portföye Ekle", key=f"add_{ticker}", use_container_width=True):
                                 try:
-                                    pm.add_position(ticker, entry, stop)
+                                    pm.add_position(ticker, entry, stop, custom_qty=custom_qty)
                                     st.success(f"{ticker} portföye eklendi.")
                                     st.rerun()
                                 except Exception as e:
@@ -248,29 +255,48 @@ def render_live_portfolio():
         for pos in pm.state.positions:
             df = price_map.get(pos.ticker)
             current_px = pos.entry_price # default
+            prev_px = current_px
             if df is not None and not df.empty:
                 current_px = float(df.iloc[-1]["Close"])
-                
+                if len(df) > 1:
+                    prev_px = float(df.iloc[-2]["Close"])
+                else:
+                    prev_px = current_px
+                    
             notional = pos.qty * current_px
             fric_cost = notional * pm.state.friction_pct
             
             pnl_tl = (current_px - pos.entry_price) * pos.qty - fric_cost
             pnl_pct = (current_px / pos.entry_price - 1.0) * 100
             
+            # Günlük PnL Değişimi
+            daily_pnl_pct = (current_px / prev_px - 1.0) * 100 if prev_px > 0 else 0.0
+            
             unrealized_total += pnl_tl
             
+            # Alert Mantığı
+            alert_msg = ""
+            rps = pos.entry_price - pos.stop_price
+            tp1_target = pos.entry_price + rps
+            
+            if current_px <= pos.stop_price * 1.02:
+                alert_msg = "🚨 <span style='color:#F44336; font-size:16px;'>**Stoba Yakın!**</span>"
+            elif not pos.tp1_done and current_px >= tp1_target * 0.98:
+                alert_msg = "🎯 <span style='color:#4CAF50; font-size:16px;'>**TP1 Hedefinde!**</span>"
+            
             with st.container():
-                st.markdown(f"### {pos.ticker}")
+                st.markdown(f"### {pos.ticker}  {alert_msg}", unsafe_allow_html=True)
                 
-                c1, c2, c3, c4 = st.columns(4)
+                c1, c2, c3, c4, c5 = st.columns(5)
                 c1.metric("Maliyet", f"{pos.entry_price:.2f}")
                 c2.metric("Güncel Fiyat", f"{current_px:.2f}", f"{pnl_pct:.2f}%")
-                c3.metric("Lot", f"{pos.qty}")
-                c4.metric("Kâr/Zarar (TL)", f"{pnl_tl:,.2f}")
+                c3.metric("Günlük Değişim", f"{current_px:.2f}", f"{daily_pnl_pct:.2f}%")
+                c4.metric("Lot", f"{pos.qty}")
+                c5.metric("Kâr/Zarar (TL)", f"{pnl_tl:,.2f}")
                 
                 bc1, bc2, bc3, bc4 = st.columns(4)
                 
-                # TP1 Button (Satış %33)
+                # TP1 Button
                 if pos.tp1_done or pos.qty < 3:
                      bc1.button("TP1 (Kâr Al)", disabled=True, key=f"tp1_{pos.ticker}")
                 else:
@@ -279,7 +305,7 @@ def render_live_portfolio():
                         st.success(f"{pos.ticker} TP1 alındı. Gerçekleşen Kâr/Zarar: {realized:,.2f} TL")
                         st.rerun()
 
-                # TP2 Button (Satış %50 of remaining)
+                # TP2 Button
                 if pos.tp2_done or pos.qty < 2:
                      bc2.button("TP2 (Kâr Al)", disabled=True, key=f"tp2_{pos.ticker}")
                 else:
@@ -288,12 +314,28 @@ def render_live_portfolio():
                         st.success(f"{pos.ticker} TP2 alındı. Gerçekleşen Kâr/Zarar: {realized:,.2f} TL")
                         st.rerun()
                         
-                # Tut / Kapat buttons
+                # Tümüyle Kapat
                 if bc4.button("🔴 Tümüyle Kapat", key=f"close_{pos.ticker}"):
                     realized = pm.close_position(pos.ticker, current_px, fraction=1.0)
                     st.success(f"{pos.ticker} pozisyonu kapatıldı. Gerçekleşen K/Z: {realized:,.2f} TL")
                     st.rerun()
-                    
+                
+                # Ek Alım (Maliyet Düşürme/Artırma) Expandersı
+                with st.expander("➕ Pozisyona Ekleme Yap (Maliyet Güncelle)"):
+                    with st.form(f"add_more_{pos.ticker}"):
+                        a1, a2, a3 = st.columns(3)
+                        add_qty = a1.number_input("Eklenecek Lot", min_value=1, value=1, step=1, key=f"am_q_{pos.ticker}")
+                        new_px = a2.number_input("Alış Fiyatı", min_value=0.01, value=current_px, step=0.01, key=f"am_p_{pos.ticker}")
+                        new_stop = a3.number_input("Yeni Stop Fiyatı", min_value=0.01, value=pos.stop_price, step=0.01, key=f"am_s_{pos.ticker}")
+                        
+                        if st.form_submit_button("Lot Ekle"):
+                            try:
+                                pm.add_to_existing_position(pos.ticker, add_qty, new_px, new_stop)
+                                st.success("Pozisyon başarıyla güncellendi.")
+                                st.rerun()
+                            except Exception as e:
+                                st.error(str(e))
+                                
                 st.divider()
                 
         color = "green" if unrealized_total >= 0 else "red"

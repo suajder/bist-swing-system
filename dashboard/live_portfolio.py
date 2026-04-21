@@ -71,7 +71,7 @@ class PortfolioManager:
         self.state.friction_pct = friction_pct
         self.save_state()
 
-    def add_position(self, ticker: str, entry_price: float, stop_price: float):
+    def add_position(self, ticker: str, entry_price: float, stop_price: float, custom_qty: Optional[int] = None):
         if len(self.state.positions) >= self.state.max_open:
             raise ValueError("Maksimum açık pozisyon sınırına ulaşıldı.")
             
@@ -85,7 +85,12 @@ class PortfolioManager:
         if risk_per_share <= 0:
             raise ValueError("Stop fiyatı giriş fiyatından küçük/eşit olmalı.")
 
-        qty = max(1, int(risk_amount / risk_per_share))
+        if custom_qty is not None:
+            if custom_qty <= 0:
+                raise ValueError("Lot miktarı 0'dan büyük olmalı.")
+            qty = custom_qty
+        else:
+            qty = max(1, int(risk_amount / risk_per_share))
         
         # Apply friction to entry capital deduction
         notional = qty * entry_price
@@ -108,6 +113,37 @@ class PortfolioManager:
         self.state.positions.append(new_pos)
         self.save_state()
         
+    def add_to_existing_position(self, ticker: str, additional_qty: int, new_entry_price: float, new_stop_price: Optional[float] = None):
+        pos = next((p for p in self.state.positions if p.ticker == ticker), None)
+        if not pos:
+            raise ValueError(f"{ticker} portföyde bulunamadı.")
+            
+        if additional_qty <= 0:
+            raise ValueError("Eklenen lot miktarı 0'dan büyük olmalı.")
+            
+        notional = additional_qty * new_entry_price
+        friction_cost = notional * self.state.friction_pct
+        deduction = notional + friction_cost
+        
+        if deduction > self.state.capital:
+            raise ValueError("Yetersiz sermaye.")
+            
+        self.state.capital -= deduction
+        
+        # Calculate new weighted average entry price
+        total_qty = pos.qty + additional_qty
+        new_avg_price = ((pos.entry_price * pos.qty) + (new_entry_price * additional_qty)) / total_qty
+        
+        pos.qty = total_qty
+        pos.entry_price = new_avg_price
+        
+        if new_stop_price is not None:
+            pos.stop_price = new_stop_price
+            
+        pos.risk_amount = (pos.entry_price - pos.stop_price) * pos.qty
+        
+        self.save_state()
+
     def close_position(self, ticker: str, current_price: float, fraction: float = 1.0, mark_tp1: bool = False, mark_tp2: bool = False) -> float:
         """Kapatılan PnL döner. fraction 0.5 ise %50'sini kapatır."""
         pos = next((p for p in self.state.positions if p.ticker == ticker), None)
