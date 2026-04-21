@@ -336,20 +336,25 @@ def portfolio_backtest_pro(
 
         price_map[sym] = df
 
-    # build signals per ticker
-    sig_map = {t: se.build(price_map[t], best_cfg_map[t][0]) for t in tickers}
-
     # market regime filter (XU100)
+    market_regime_series = None
     if "XU100.IS" in price_map:
         idx_df = price_map["XU100.IS"].copy()
         idx_close = idx_df["Close"].astype(float)
+        idx_ema50 = ema(idx_close, 50)
         idx_ma200 = idx_close.rolling(200).mean()
         idx_ret = idx_close.pct_change()
         idx_vol20 = idx_ret.rolling(20).std()
+        
+        market_regime_series = idx_close > idx_ema50
     else:
         idx_close = None
+        idx_ema50 = None
         idx_ma200 = None
         idx_vol20 = None
+
+    # build signals per ticker
+    sig_map = {t: se.build(price_map[t], best_cfg_map[t][0], market_regime_series) for t in tickers}
 
     # common calendar
     cal = price_map[tickers[0]].index
@@ -411,11 +416,11 @@ def portfolio_backtest_pro(
         market_vol_ok = True
 
         if idx_close is not None and t in idx_close.index:
-            ma200_t = safe_float(idx_ma200.loc[t], np.nan)
+            ema50_t = safe_float(idx_ema50.loc[t], np.nan)
             close_t = safe_float(idx_close.loc[t], np.nan)
 
-            if np.isfinite(ma200_t) and np.isfinite(close_t):
-                market_trend_ok = close_t > ma200_t
+            if np.isfinite(ema50_t) and np.isfinite(close_t):
+                market_trend_ok = close_t > ema50_t
 
             if idx_vol20 is not None:
                 vol20_t = safe_float(idx_vol20.loc[t], np.nan)

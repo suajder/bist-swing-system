@@ -117,7 +117,7 @@ def run():
         if df.loc[t, "ADV20"] > 20_000_000:
             score += 1
         
-        logger.info(f"{sym} → SCORE: {score}")
+        logger.info(f"{sym} -> SCORE: {score}")
 
         # MIN SCORE FILTER
         if score < 3:
