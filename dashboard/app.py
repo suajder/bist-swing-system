@@ -6,9 +6,10 @@ from pathlib import Path
 import os
 import sys
 
-# Add root to sys.path so we can import from bist_swing
-sys.path.append(str(Path(__file__).resolve().parents[1]))
-
+# Add root and src to sys.path so we can import from dashboard and bist_swing
+root_path = Path(__file__).resolve().parents[1]
+sys.path.append(str(root_path))
+sys.path.append(str(root_path / "src"))
 from dashboard.live_portfolio import PortfolioManager
 from bist_swing.data import get_price_data
 
