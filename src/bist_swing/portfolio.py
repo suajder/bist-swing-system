@@ -476,8 +476,8 @@ def portfolio_backtest_pro(
                 if current_r_leg >= float(pparams.weekly_partial_min_r):
                     qty = round(float(pos.shares) * float(pparams.weekly_partial_fraction))
                     
-                    pos.weekly_partial_done = True
                     if qty > 0:
+                        pos.weekly_partial_done = True
                         px = o2 * (1 - slip)
                         proceeds = qty * px * (1 - fee)
                         cash += proceeds
@@ -536,9 +536,9 @@ def portfolio_backtest_pro(
             if evt == "TP1":
                 qty = round(min(float(pos.orig_shares) / 3.0, float(pos.shares)))
                 
-                pos.tp1 = True
-                pos.stop_px = max(float(pos.stop_px), float(pos.entry_px))
                 if qty > 0:
+                    pos.tp1 = True
+                    pos.stop_px = max(float(pos.stop_px), float(pos.entry_px))
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
@@ -564,8 +564,8 @@ def portfolio_backtest_pro(
             if evt == "TP2":
                 qty = round(min(float(pos.orig_shares) / 3.0, float(pos.shares)))
                 
-                pos.tp2 = True
                 if qty > 0:
+                    pos.tp2 = True
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
                     cash += proceeds
