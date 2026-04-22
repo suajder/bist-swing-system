@@ -1,9 +1,7 @@
 from __future__ import annotations
 from dataclasses import dataclass
 import pandas as pd
-
-from bist_swing.indicators import ema, rsi, atr, zscore
-
+from bist_swing.indicators import ema, rsi, atr, zscore, rolling_zscore
 @dataclass(frozen=True)
 class SignalParams:
     d_ema_fast: int = 20
@@ -28,7 +26,7 @@ class SignalEngine:
         out["d_ema200"] = ema(df["Close"], 200) # Uzun vade trend
         out["d_rsi14"] = rsi(df["Close"], sp.rsi_n)
         out["d_rsi_short"] = rsi(df["Close"], sp.rsi_short_n)
-        out["zscore"] = zscore(df["Close"], sp.zscore_n)
+        out["zscore"] = rolling_zscore(df["Close"], sp.zscore_n)
         out["atr14"] = atr(df, 14)
         out["mom20"] = df["Close"].pct_change(sp.mom_n)
 

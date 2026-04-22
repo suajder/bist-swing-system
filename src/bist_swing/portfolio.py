@@ -474,7 +474,9 @@ def portfolio_backtest_pro(
 
                 # only partial if in profit enough
                 if current_r_leg >= float(pparams.weekly_partial_min_r):
-                    qty = float(pos.shares) * float(pparams.weekly_partial_fraction)
+                    qty = round(float(pos.shares) * float(pparams.weekly_partial_fraction))
+                    
+                    pos.weekly_partial_done = True
                     if qty > 0:
                         px = o2 * (1 - slip)
                         proceeds = qty * px * (1 - fee)
@@ -489,7 +491,6 @@ def portfolio_backtest_pro(
                         week_r += r_pnl
 
                         pos.shares -= qty
-                        pos.weekly_partial_done = True
 
                         log_trade(nxt, sym, pos.trade_id, "WeeklyPartial", px, qty, r_pnl, r_leg)
 
@@ -533,7 +534,10 @@ def portfolio_backtest_pro(
                 continue
 
             if evt == "TP1":
-                qty = min(float(pos.orig_shares) / 3.0, float(pos.shares))
+                qty = round(min(float(pos.orig_shares) / 3.0, float(pos.shares)))
+                
+                pos.tp1 = True
+                pos.stop_px = max(float(pos.stop_px), float(pos.entry_px))
                 if qty > 0:
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
@@ -548,8 +552,6 @@ def portfolio_backtest_pro(
                     week_r += r_pnl
 
                     pos.shares -= qty
-                    pos.tp1 = True
-                    pos.stop_px = pos.entry_px
 
                     log_trade(nxt, sym, pos.trade_id, "TP1", px, qty, r_pnl, r_leg)
 
@@ -560,7 +562,9 @@ def portfolio_backtest_pro(
                 continue
 
             if evt == "TP2":
-                qty = min(float(pos.orig_shares) / 3.0, float(pos.shares))
+                qty = round(min(float(pos.orig_shares) / 3.0, float(pos.shares)))
+                
+                pos.tp2 = True
                 if qty > 0:
                     px = float(lvl) * (1 - slip)
                     proceeds = qty * px * (1 - fee)
@@ -575,7 +579,6 @@ def portfolio_backtest_pro(
                     week_r += r_pnl
 
                     pos.shares -= qty
-                    pos.tp2 = True
 
                     log_trade(nxt, sym, pos.trade_id, "TP2", px, qty, r_pnl, r_leg)
 
