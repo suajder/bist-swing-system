@@ -150,7 +150,7 @@ class PortfolioManager:
         if not pos:
             return 0.0
 
-        close_qty = int(pos.qty * fraction)
+        close_qty = round(pos.qty * fraction)
         if close_qty <= 0:
             return 0.0
 
