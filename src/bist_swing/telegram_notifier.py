@@ -16,7 +16,7 @@ class TelegramNotifier:
 
     def send(self, text: str) -> None:
         url = f"https://api.telegram.org/bot{self.token}/sendMessage"
-        payload = {"chat_id": self.chat_id, "text": text, "disable_web_page_preview": True}
+        payload = {"chat_id": self.chat_id, "text": text, "parse_mode": "HTML", "disable_web_page_preview": True}
         r = requests.post(url, json=payload, timeout=self.timeout)
         if r.status_code != 200:
             raise RuntimeError(f"Telegram send failed: {r.status_code} {r.text}")

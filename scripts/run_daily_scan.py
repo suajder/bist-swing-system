@@ -157,14 +157,27 @@ def run():
             tg.send("📭 Bugün sinyal yok.")
             return
 
-        msg = "🚀 LIVE SIGNALS\n\n"
+        msg = "🚀 <b>BIST GÜNLÜK TARAMA (TOP 5)</b>\n\n"
 
         for _, row in out.iterrows():
+            ticker = row['ticker']
+            ticker_clean = ticker.replace('.IS', '')
+            entry = row['entry']
+            stop = row['stop']
+            risk = row['risk']
+            score = row['score']
+            
+            tv_link = f"https://tr.tradingview.com/chart/?symbol=BIST%3A{ticker_clean}"
+            tp1 = entry + risk
+            tp2 = entry + (risk * 2)
+            
             msg += (
-                f"{row['ticker']}\n"
-                f"Entry: {row['entry']:.2f}\n"
-                f"Stop: {row['stop']:.2f}\n"
-                f"Risk: {row['risk']:.2f}\n\n"
+                f"🎯 <b><a href='{tv_link}'>{ticker_clean}</a></b> (Sistem Puanı: {score}/5)\n"
+                f"▫️ <b>Giriş (Limit):</b> {entry:.2f} ₺\n"
+                f"▫️ <b>Stop Loss:</b> {stop:.2f} ₺\n"
+                f"▫️ <b>TP1 (1R):</b> {tp1:.2f} ₺\n"
+                f"▫️ <b>TP2 (2R):</b> {tp2:.2f} ₺\n"
+                f"<i>Hisse başı risk: {risk:.2f} ₺</i>\n\n"
             )
 
         tg.send(msg)
