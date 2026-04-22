@@ -30,6 +30,7 @@ jobs:
           
       - name: Günlük Taramayı (Radar) Başlat
         env:
+          PYTHONPATH: src
           # Güvenlik için token'larımızı GitHub Secrets'tan alacağız.
           TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
