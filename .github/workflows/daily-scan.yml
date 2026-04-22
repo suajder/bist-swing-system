@@ -1,0 +1,37 @@
+name: BIST Daily Scan
+
+on:
+  schedule:
+    # GitHub saatleri UTC'dir. Türkiye saati (UTC+3) ile 09:45'te çalışması için 06:45 yazarız.
+    # 1-5 ibaresi: Sadece Hafta İçi (Pazartesi - Cuma) çalışması içindir.
+    - cron: '45 06 * * 1-5'
+  
+  # Burası sayesinde GitHub üzerinden istediğimiz zaman elle de (manuel) tetikleyebileceğiz.
+  workflow_dispatch: 
+
+jobs:
+  run-scan:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Kodları Sunucuya Çek
+        uses: actions/checkout@v4
+        
+      - name: Python Ortamını Kur
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
+          cache: 'pip'
+          
+      - name: Gerekli Kütüphaneleri Yükle
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          
+      - name: Günlük Taramayı (Radar) Başlat
+        env:
+          # Güvenlik için token'larımızı GitHub Secrets'tan alacağız.
+          TG_BOT_TOKEN: ${{ secrets.TG_BOT_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+        run: |
+          python scripts/run_daily_scan.py
