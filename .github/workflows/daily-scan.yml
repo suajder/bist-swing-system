@@ -2,9 +2,9 @@ name: BIST Daily Scan
 
 on:
   schedule:
-    # GitHub saatleri UTC'dir. Türkiye saati (UTC+3) ile 09:45'te çalışması için 06:45 yazarız.
-    # 1-5 ibaresi: Sadece Hafta İçi (Pazartesi - Cuma) çalışması içindir.
-    - cron: '45 06 * * 1-5'
+    # GitHub saatleri UTC'dir. Gecikmeleri (sıra beklemeyi) aşmak için rastgele bir dakika seçiyoruz.
+    # 05:23 UTC -> 08:23 TSİ'dir. Piyasalar açılmadan (09:40) raporun gelmesini sağlar.
+    - cron: '23 05 * * 1-5'
   
   # Burası sayesinde GitHub üzerinden istediğimiz zaman elle de (manuel) tetikleyebileceğiz.
   workflow_dispatch: 
