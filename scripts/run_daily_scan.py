@@ -132,22 +132,19 @@ def run():
             "score": score,
         })
 
-    out = pd.DataFrame(signals)
+    out = pd.DataFrame(signals, columns=["date", "ticker", "entry", "stop", "risk", "score"])
 
     if out.empty:
         logger.info("No signals today.")
-        out.to_csv(OUT / "live_signals.csv", index=False)
-        return
-
-    # =========================
-    # 🔥 TOP SELECTION
-    # =========================
-    out = out.sort_values("score", ascending=False).head(top_k)
+    else:
+        # =========================
+        # 🔥 TOP SELECTION
+        # =========================
+        out = out.sort_values("score", ascending=False).head(top_k)
+        logger.info("=== LIVE SIGNALS ===")
+        logger.info(f"\n{out}")
 
     out.to_csv(OUT / "live_signals.csv", index=False)
-
-    logger.info("=== LIVE SIGNALS ===")
-    logger.info(f"\n{out}")
 
 # TELEGRAM GÖNDERİMİ
     try:
