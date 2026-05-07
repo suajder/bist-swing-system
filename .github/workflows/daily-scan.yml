@@ -4,7 +4,7 @@ on:
   schedule:
     # GitHub saatleri UTC'dir. Gecikmeleri (sıra beklemeyi) aşmak için rastgele bir dakika seçiyoruz.
     # 04:23 UTC -> 07:23 TSİ'dir. Piyasalar açılmadan (09:40) raporun gelmesini sağlar.
-    - cron: '23 04 * * 1-5'
+    - cron: '01 04 * * 1-5'
   
   # Burası sayesinde GitHub üzerinden istediğimiz zaman elle de (manuel) tetikleyebileceğiz.
   # Zamanlayıcıyı (scheduler) yeniden senkronize etmek için eklendi.
