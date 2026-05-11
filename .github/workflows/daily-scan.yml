@@ -12,6 +12,8 @@ on:
 jobs:
   run-scan:
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     
     steps:
       - name: Kodları Sunucuya Çek
@@ -36,3 +38,15 @@ jobs:
           TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
         run: |
           python scripts/run_daily_scan.py
+
+      - name: Sonuçları GitHub'a Kaydet
+        run: |
+          git config --local user.email "github-actions[bot]@users.noreply.github.com"
+          git config --local user.name "github-actions[bot]"
+          git add out/live/live_signals.csv
+          if ! git diff --staged --quiet; then
+            git commit -m "Otomatik Güncelleme: Günlük tarama sonuçları (live_signals.csv) [skip ci]"
+            git push
+          else
+            echo "Değişiklik bulunamadı, commit işlemi atlanıyor."
+          fi

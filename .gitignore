@@ -36,5 +36,5 @@ _smoke_*.py
 
 # Runtime outputs
 out/
+!out/live/live_signals.csv
 configs/universe.txt.bak
-
