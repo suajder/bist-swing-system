@@ -3,8 +3,8 @@ name: BIST Daily Scan
 on:
   schedule:
     # GitHub saatleri UTC'dir. Gecikmeleri (sıra beklemeyi) aşmak için rastgele bir dakika seçiyoruz.
-    # 03:15 UTC -> 06:15 TSİ'dir. Piyasalar açılmadan (09:40) raporun gelmesini sağlar.
-    - cron: '15 03 * * 1-5'
+    # 01:15 UTC -> 04:15 TSİ'dir. Piyasalar açılmadan (09:40) raporun gelmesini sağlar.
+    - cron: '15 01 * * 1-5'
   
   # Burası sayesinde GitHub üzerinden istediğimiz zaman elle de (manuel) tetikleyebileceğiz.
   # Zamanlayıcıyı (scheduler) yeniden senkronize etmek için eklendi.
